@@ -15,7 +15,8 @@ namespace EasyOptimizerV
         BCnEncoder,
         NVTT,
         DirectXTex,
-        ImageMagick
+        ImageMagick,
+        TexFury
     }
 
     public interface ITextureEncoder
@@ -37,6 +38,8 @@ namespace EasyOptimizerV
                     return new DirectXTexEncoderAdapter();
                 case EncoderEngine.ImageMagick:
                     return new MagickEncoderAdapter();
+                case EncoderEngine.TexFury:
+                    return new TexFuryEncoderAdapter();
                 default:
                     return new BCnEncoderAdapter();
             }
@@ -354,8 +357,89 @@ namespace EasyOptimizerV
         }
     }
 
+    public class TexFuryEncoderAdapter : ITextureEncoder
+    {
+        public byte[] Encode(Bitmap bitmap, TextureFormat targetFormat, int mipLimit, out int mipsGenerated)
+        {
+            if (!Mapping.IsCompressed(targetFormat))
+            {
+                var fallback = new BCnEncoderAdapter();
+                return fallback.Encode(bitmap, targetFormat, mipLimit, out mipsGenerated);
+            }
+
+            int w = bitmap.Width;
+            int h = bitmap.Height;
+            var bmpData = bitmap.LockBits(new Rectangle(0, 0, w, h),
+                System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
+            byte[] bgra = new byte[w * h * 4];
+            for (int y = 0; y < h; y++)
+            {
+                IntPtr srcRow = bmpData.Scan0 + (y * bmpData.Stride);
+                System.Runtime.InteropServices.Marshal.Copy(srcRow, bgra, y * w * 4, w * 4);
+            }
+            bitmap.UnlockBits(bmpData);
+
+            byte[] rgba = new byte[bgra.Length];
+            for (int i = 0; i < bgra.Length; i += 4)
+            {
+                rgba[i] = bgra[i + 2];
+                rgba[i + 1] = bgra[i + 1];
+                rgba[i + 2] = bgra[i];
+                rgba[i + 3] = bgra[i + 3];
+            }
+
+            int tfFormat = Mapping.ToTexFuryFormat(targetFormat);
+            int mipmaps = mipLimit <= 0 ? 0 : mipLimit;
+
+            var pinned = System.Runtime.InteropServices.GCHandle.Alloc(rgba, System.Runtime.InteropServices.GCHandleType.Pinned);
+            IntPtr img = IntPtr.Zero;
+            IntPtr compressed = IntPtr.Zero;
+            try
+            {
+                img = TexFuryNative.tf_create_image(w, h, pinned.AddrOfPinnedObject());
+                pinned.Free();
+
+                compressed = TexFuryNative.tf_compress(img, tfFormat, mipmaps, 4, 0.5f, 0);
+
+                TexFuryNative.tf_free_image(img);
+                img = IntPtr.Zero;
+
+                mipsGenerated = TexFuryNative.tf_compressed_mip_count(compressed);
+                long size = (long)TexFuryNative.tf_compressed_size(compressed);
+                IntPtr dataPtr = TexFuryNative.tf_compressed_data(compressed);
+
+                byte[] result = new byte[size];
+                System.Runtime.InteropServices.Marshal.Copy(dataPtr, result, 0, (int)size);
+                return result;
+            }
+            finally
+            {
+                if (pinned.IsAllocated) pinned.Free();
+                if (img != IntPtr.Zero) TexFuryNative.tf_free_image(img);
+                if (compressed != IntPtr.Zero) TexFuryNative.tf_free_compressed(compressed);
+            }
+        }
+    }
+
     public static class Mapping
     {
+        public static int ToTexFuryFormat(TextureFormat format)
+        {
+            switch (format)
+            {
+                case TextureFormat.D3DFMT_DXT1: return (int)TfBCFormat.BC1;
+                case TextureFormat.D3DFMT_DXT3: return (int)TfBCFormat.BC3;
+                case TextureFormat.D3DFMT_DXT5: return (int)TfBCFormat.BC3;
+                case TextureFormat.D3DFMT_ATI1: return (int)TfBCFormat.BC4;
+                case TextureFormat.D3DFMT_ATI2: return (int)TfBCFormat.BC5;
+                case TextureFormat.D3DFMT_BC7: return (int)TfBCFormat.BC7;
+                case TextureFormat.D3DFMT_A8R8G8B8: return (int)TfBCFormat.A8R8G8B8;
+                default: return (int)TfBCFormat.BC3;
+            }
+        }
+
         public static CompressionFormat ToBCnFormat(TextureFormat format)
         {
             switch (format)

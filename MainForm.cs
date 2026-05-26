@@ -18,22 +18,23 @@ namespace EasyOptimizerV
         private ToolStripStatusLabel? statusLabel;
         private MenuStrip? menuStrip;
         private ToolStrip? toolStrip;
-        private System.Collections.Generic.List<YtdFile> loadedYtds = new System.Collections.Generic.List<YtdFile>();
-        private System.Collections.Generic.Dictionary<YtdFile, string> ytdFilePaths = new System.Collections.Generic.Dictionary<YtdFile, string>();
-        private System.Collections.Generic.Dictionary<YtdFile, WtdFile> wtdBackingFiles = new System.Collections.Generic.Dictionary<YtdFile, WtdFile>();
+        private System.Collections.Generic.List<YtdHandle> loadedHandles = new System.Collections.Generic.List<YtdHandle>();
         private TextBox? searchTextBox;
         private string currentSearch = "";
         private string currentPreviewRes = "128";
-        private System.Collections.Generic.HashSet<YtdFile> expandedYtds = new System.Collections.Generic.HashSet<YtdFile>();
+        private System.Collections.Generic.HashSet<string> expandedHandleIds = new System.Collections.Generic.HashSet<string>();
         private System.Collections.Generic.HashSet<string> expandedVirtualFolders = new System.Collections.Generic.HashSet<string>();
-        private System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<(Texture, YtdFile)>> duplicateGroups = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<(Texture, YtdFile)>>();
+        private System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<(TextureInfo, YtdHandle)>> duplicateGroups = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<(TextureInfo, YtdHandle)>>();
         private bool showingDuplicates = false;
         private EncoderEngine selectedEngine = EncoderEngine.BCnEncoder;
         private ComboBox? encoderCombo;
+        private IYtdBackend backend;
+        private ComboBox? backendCombo;
 
         public MainForm()
         {
             InitializeComponent();
+            backend = new CodeWalkerBackend();
             try
             {
                 SetupUI();
@@ -73,8 +74,8 @@ namespace EasyOptimizerV
 
             headerTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); // Title
             headerTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F)); // Search
-            
-            headerTable.Padding = new Padding(16, 0, 16, 0); 
+
+            headerTable.Padding = new Padding(16, 0, 16, 0);
 
             // 1. Title
             Label lblTitle = new Label();
@@ -83,29 +84,29 @@ namespace EasyOptimizerV
             lblTitle.ForeColor = Theme.TextPrimaryDark;
             lblTitle.AutoSize = true;
             lblTitle.Anchor = AnchorStyles.Left;
-            lblTitle.Margin = new Padding(0, 0, 12, 0); 
+            lblTitle.Margin = new Padding(0, 0, 12, 0);
             headerTable.Controls.Add(lblTitle, 0, 0);
 
             // 2. Search Box
             Panel searchContainer = new Panel();
             searchContainer.Height = 36;
             searchContainer.BackColor = Theme.BackgroundDark;
-            searchContainer.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top; 
-            searchContainer.Margin = new Padding(0, 12, 0, 0); 
-            
+            searchContainer.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+            searchContainer.Margin = new Padding(0, 12, 0, 0);
+
             searchTextBox = new TextBox();
             searchTextBox.BorderStyle = BorderStyle.None;
             searchTextBox.BackColor = Theme.BackgroundDark;
             searchTextBox.ForeColor = Theme.TextPrimaryDark;
             searchTextBox.Font = new Font("Segoe UI", 10F);
             searchTextBox.PlaceholderText = "Search textures...";
-            
+
             // Y=9 to center vertically (36 - TextHeight)/2
             searchTextBox.Location = new Point(12, 9);
-            searchTextBox.Width = 200; 
-            searchTextBox.Anchor = AnchorStyles.Left | AnchorStyles.Right; 
+            searchTextBox.Width = 200;
+            searchTextBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             searchTextBox.TextChanged += (s, e) => { SearchTextBox_TextChanged(s, e); };
-            
+
             searchContainer.Controls.Add(searchTextBox);
             headerTable.Controls.Add(searchContainer, 1, 0);
 
@@ -116,7 +117,7 @@ namespace EasyOptimizerV
             string[] gridNames = { "Small", "Medium", "Native" };
             string[] resValues = { "128", "256", "Native" };
             int currentSizeIndex = 1; // Start at Medium
-            
+
             Button btnGridSize = new Button();
             btnGridSize.Text = $"Grid: {gridNames[currentSizeIndex]}";
             btnGridSize.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
@@ -128,7 +129,8 @@ namespace EasyOptimizerV
             btnGridSize.Margin = new Padding(0, 4, 0, 4);
             btnGridSize.Cursor = Cursors.Hand;
 
-            btnGridSize.Click += (s, e) => {
+            btnGridSize.Click += (s, e) =>
+            {
                 currentSizeIndex = (currentSizeIndex + 1) % gridNames.Length;
                 btnGridSize.Text = $"Grid: {gridNames[currentSizeIndex]}";
                 currentPreviewRes = resValues[currentSizeIndex];
@@ -205,6 +207,7 @@ namespace EasyOptimizerV
             btnNameDup.FlatStyle = FlatStyle.Flat;
             btnNameDup.FlatAppearance.BorderSize = 0;
             btnNameDup.Height = 36;
+            btnNameDup.Width = 188;
             btnNameDup.Margin = new Padding(0, 4, 0, 4);
             btnNameDup.Cursor = Cursors.Hand;
             btnNameDup.Click += (s, e) => PerformDeDuplicationAnalysis(true, false);
@@ -217,6 +220,7 @@ namespace EasyOptimizerV
             btnHexDup.FlatStyle = FlatStyle.Flat;
             btnHexDup.FlatAppearance.BorderSize = 0;
             btnHexDup.Height = 36;
+            btnHexDup.Width = 188;
             btnHexDup.Margin = new Padding(0, 4, 0, 4);
             btnHexDup.Cursor = Cursors.Hand;
             btnHexDup.Click += (s, e) => PerformDeDuplicationAnalysis(false, true);
@@ -234,7 +238,7 @@ namespace EasyOptimizerV
             btnMigrate.Click += (s, e) => MigrateDuplicates_Click();
 
             Button btnSmartOpt = new Button();
-            btnSmartOpt.Text = "Smart Optimize ✨";
+            btnSmartOpt.Text = "Smart Optimize";
             btnSmartOpt.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
             btnSmartOpt.BackColor = Color.FromArgb(154, 73, 222); // Purple
             btnSmartOpt.ForeColor = Color.White;
@@ -306,11 +310,44 @@ namespace EasyOptimizerV
             encoderCombo.BackColor = Theme.BackgroundDark;
             encoderCombo.ForeColor = Color.White;
             encoderCombo.FlatStyle = FlatStyle.Flat;
-            encoderCombo.SelectedIndexChanged += (s, e) => {
+            encoderCombo.SelectedIndexChanged += (s, e) =>
+            {
                 if (encoderCombo.SelectedItem is EncoderEngine engine)
                     selectedEngine = engine;
             };
             sidebar.Controls.Add(encoderCombo);
+
+            AddSidebarLabel("DECODER ENGINE");
+            backendCombo = new ComboBox();
+            backendCombo.Width = 188;
+            backendCombo.Items.AddRange(new object[] { "CodeWalker", "FiveFury" });
+            backendCombo.SelectedItem = "CodeWalker";
+            backendCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            backendCombo.BackColor = Theme.BackgroundDark;
+            backendCombo.ForeColor = Color.White;
+            backendCombo.FlatStyle = FlatStyle.Flat;
+            backendCombo.SelectedIndexChanged += (s, e) =>
+            {
+                string? selected = backendCombo.SelectedItem?.ToString();
+                if (selected == "FiveFury")
+                {
+                    try
+                    {
+                        backend = new FiveFuryBackend();
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Failed to initialize FiveFury backend:\n{ex.Message}\n\nPlace fivefury-cli.exe in the libs/ folder.", "Backend Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        backendCombo.SelectedItem = "CodeWalker";
+                        backend = new CodeWalkerBackend();
+                    }
+                }
+                else
+                {
+                    backend = new CodeWalkerBackend();
+                }
+            };
+            sidebar.Controls.Add(backendCombo);
 
             contentLayout.Controls.Add(sidebar, 0, 0);
 
@@ -319,25 +356,27 @@ namespace EasyOptimizerV
             flowLayoutPanel.Dock = DockStyle.Fill;
             flowLayoutPanel.AutoScroll = true;
             flowLayoutPanel.BackColor = Theme.BackgroundDark;
-            flowLayoutPanel.FlowDirection = FlowDirection.TopDown; 
-            flowLayoutPanel.WrapContents = false; 
+            flowLayoutPanel.FlowDirection = FlowDirection.TopDown;
+            flowLayoutPanel.WrapContents = false;
             flowLayoutPanel.Padding = new Padding(16);
 
             // Force folders to 100% width on resize
-            flowLayoutPanel.SizeChanged += (s, e) => {
+            flowLayoutPanel.SizeChanged += (s, e) =>
+            {
                 if (flowLayoutPanel.ClientSize.Width <= 0) return;
                 int targetWidth = flowLayoutPanel.ClientSize.Width - flowLayoutPanel.Padding.Horizontal - 25;
                 flowLayoutPanel.SuspendLayout();
-                foreach(Control c in flowLayoutPanel.Controls) {
+                foreach (Control c in flowLayoutPanel.Controls)
+                {
                     if (c is YtdFolderCard folder) folder.Width = targetWidth;
                 }
                 flowLayoutPanel.ResumeLayout();
             };
-            
+
             contentLayout.Controls.Add(flowLayoutPanel, 1, 0);
-            
+
             mainLayout.Controls.Add(contentLayout, 0, 1);
-            
+
             this.Controls.Add(mainLayout);
 
             // Status Strip (Hidden but initialized)
@@ -419,10 +458,8 @@ namespace EasyOptimizerV
 
         private void ClearAll_Click()
         {
-            loadedYtds.Clear();
-            ytdFilePaths.Clear();
-            wtdBackingFiles.Clear();
-            expandedYtds.Clear();
+            loadedHandles.Clear();
+            expandedHandleIds.Clear();
             expandedVirtualFolders.Clear();
             duplicateGroups.Clear();
             showingDuplicates = false;
@@ -432,28 +469,45 @@ namespace EasyOptimizerV
 
         private void SaveAll_Click()
         {
-            if (loadedYtds.Count == 0) return;
-            
+            if (loadedHandles.Count == 0) return;
+
+            var result = MessageBox.Show("Deseja sobrescrever os arquivos originais?\n\n'Sim' para Sobrescrever\n'Não' para Selecionar Nova Pasta\n'Cancelar' para Abortar", "Salvar Tudo", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+
+            if (result == DialogResult.Cancel) return;
+
+            string? targetFolder = null;
+            if (result == DialogResult.No)
+            {
+                using (FolderBrowserDialog fbd = new FolderBrowserDialog())
+                {
+                    fbd.Description = "Selecione a pasta para salvar todos os arquivos otimizados";
+                    if (fbd.ShowDialog() == DialogResult.OK)
+                    {
+                        targetFolder = fbd.SelectedPath;
+                    }
+                    else return;
+                }
+            }
+
             int savedCount = 0;
             try
             {
-                foreach (var ytd in loadedYtds)
+                foreach (var handle in loadedHandles)
                 {
-                    if (ytdFilePaths.TryGetValue(ytd, out string? path))
+                    if (!string.IsNullOrEmpty(handle.FilePath))
                     {
-                        if (wtdBackingFiles.TryGetValue(ytd, out WtdFile? wtd))
-                            File.WriteAllBytes(path, wtd.Save());
-                        else
-                            File.WriteAllBytes(path, ytd.Save());
+                        string savePath = targetFolder != null ? Path.Combine(targetFolder, Path.GetFileName(handle.FilePath)) : handle.FilePath;
+                        byte[] data = backend.SaveYtd(handle);
+                        File.WriteAllBytes(savePath, data);
                         savedCount++;
                     }
                 }
-                MessageBox.Show($"Successfully saved {savedCount} files.", "Save All", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                if (statusLabel != null) statusLabel.Text = $"Saved {savedCount} files.";
+                MessageBox.Show($"Sucesso ao salvar {savedCount} arquivos.", "Salvar Tudo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (statusLabel != null) statusLabel.Text = $"Salvos {savedCount} arquivos.";
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error saving files: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Erro ao salvar arquivos: {ex.Message}", "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -464,21 +518,15 @@ namespace EasyOptimizerV
                 if (statusLabel != null) statusLabel.Text = $"Loading {Path.GetFileName(filename)}...";
                 Application.DoEvents();
 
-                byte[] data = File.ReadAllBytes(filename);
-                YtdFile ytd = new YtdFile();
-                ytd.Load(data);
-                ytd.Name = Path.GetFileName(filename);
+                var handle = backend.LoadYtd(filename);
+                loadedHandles.Add(handle);
 
-                loadedYtds.Add(ytd);
-                ytdFilePaths[ytd] = filename;
+                if (statusLabel != null) statusLabel.Text = $"Loaded {handle.Textures.Count} textures from {handle.Name}";
 
-                int count = ytd.TextureDict?.Textures?.data_items?.Length ?? 0;
-                if (statusLabel != null) statusLabel.Text = $"Loaded {count} textures from {ytd.Name}";
-                
                 duplicateGroups.Clear();
                 showingDuplicates = false;
                 expandedVirtualFolders.Clear();
-                RenderTextures(); // Refresh to show the new folder
+                RenderTextures();
             }
             catch (Exception ex)
             {
@@ -493,15 +541,15 @@ namespace EasyOptimizerV
                 if (statusLabel != null) statusLabel.Text = $"Loading {Path.GetFileName(filename)}...";
                 Application.DoEvents();
 
-                WtdFile wtd = WtdFile.Load(filename);
-                YtdFile ytd = wtd.AsYtd;
+                var handle = backend.LoadWtd(filename);
+                if (handle == null)
+                {
+                    MessageBox.Show($"The current backend ({backend.BackendName}) does not support WTD files.", "Unsupported", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                loadedHandles.Add(handle);
 
-                loadedYtds.Add(ytd);
-                ytdFilePaths[ytd] = filename;
-                wtdBackingFiles[ytd] = wtd;
-
-                int count = ytd.TextureDict?.Textures?.data_items?.Length ?? 0;
-                if (statusLabel != null) statusLabel.Text = $"Loaded {count} textures from {ytd.Name}";
+                if (statusLabel != null) statusLabel.Text = $"Loaded {handle.Textures.Count} textures from {handle.Name}";
 
                 duplicateGroups.Clear();
                 showingDuplicates = false;
@@ -518,21 +566,21 @@ namespace EasyOptimizerV
         {
             if (flowLayoutPanel == null) return;
             flowLayoutPanel.SuspendLayout();
-            
+
             int scrollY = flowLayoutPanel.VerticalScroll.Value;
             flowLayoutPanel.Controls.Clear();
 
             int targetWidth = flowLayoutPanel.ClientSize.Width - flowLayoutPanel.Padding.Horizontal - 25;
-            if (targetWidth < 200) targetWidth = 800; // Fallback
+            if (targetWidth < 200) targetWidth = 800;
 
             int totalVisibleTextures = 0;
 
-            // 1. Render DUPLICATES folder if active
             if (showingDuplicates && duplicateGroups.Count > 0)
             {
                 bool rootExpanded = expandedVirtualFolders.Contains("DUPLICATES_ROOT");
                 var rootFolder = new YtdFolderCard("DUPLICATES_ROOT", "DUPLICATES (FOLDER)", $"{duplicateGroups.Count} unique groups detected", Color.Cyan, rootExpanded, targetWidth);
-                rootFolder.OnToggleRequested += (card) => {
+                rootFolder.OnToggleRequested += (card) =>
+                {
                     if (expandedVirtualFolders.Contains(card.VirtualId!)) expandedVirtualFolders.Remove(card.VirtualId!);
                     else expandedVirtualFolders.Add(card.VirtualId!);
                     RenderTextures();
@@ -545,14 +593,12 @@ namespace EasyOptimizerV
                     {
                         string groupId = $"DUP_GROUP:{kvp.Key}";
                         bool groupExpanded = expandedVirtualFolders.Contains(groupId);
-                        
-                        // Use the name of the first texture in the group
                         string displayName = kvp.Value.Count > 0 ? kvp.Value[0].Item1.Name : "Unknown Group";
-                        
-                        // Sub-folder per duplicate group (indented)
+
                         var groupCard = new YtdFolderCard(groupId, $"Group: {displayName}", $"{kvp.Value.Count} instances", Color.Yellow, groupExpanded, targetWidth - 20);
                         groupCard.Margin = new Padding(20, 0, 0, 4);
-                        groupCard.OnToggleRequested += (card) => {
+                        groupCard.OnToggleRequested += (card) =>
+                        {
                             if (expandedVirtualFolders.Contains(card.VirtualId!)) expandedVirtualFolders.Remove(card.VirtualId!);
                             else expandedVirtualFolders.Add(card.VirtualId!);
                             RenderTextures();
@@ -566,7 +612,7 @@ namespace EasyOptimizerV
                             subGrid.WrapContents = true;
                             subGrid.AutoSize = true;
                             subGrid.Width = targetWidth;
-                            subGrid.Padding = new Padding(40, 12, 0, 24); // More indent
+                            subGrid.Padding = new Padding(40, 12, 0, 24);
                             subGrid.BackColor = Color.Transparent;
 
                             foreach (var item in kvp.Value)
@@ -580,66 +626,55 @@ namespace EasyOptimizerV
                 }
             }
 
-            // 2. Render normal YTD Folders
-            foreach (var ytd in loadedYtds)
+            foreach (var handle in loadedHandles)
             {
-                // Add Folder Header
-                bool isExpanded = expandedYtds.Contains(ytd);
-                string fileType = wtdBackingFiles.ContainsKey(ytd) ? "WTD" : "YTD";
-                var folderCard = new YtdFolderCard(ytd, isExpanded, targetWidth, fileType);
-                folderCard.OnToggleRequested += (card) => {
-                    bool wasExpanded = expandedYtds.Contains(card.Ytd!);
-                    expandedYtds.Clear(); // Accordion for YTDs
-                    if (!wasExpanded) expandedYtds.Add(card.Ytd!);
+                bool isExpanded = expandedHandleIds.Contains(handle.Id);
+                var folderCard = new YtdFolderCard(handle.Id, handle.Name, $"{handle.Textures.Count} textures", handle.FileType == "WTD" ? Color.FromArgb(255, 179, 71) : Theme.Primary, isExpanded, targetWidth);
+                folderCard.OnToggleRequested += (card) =>
+                {
+                    bool wasExpanded = expandedHandleIds.Contains(card.VirtualId!);
+                    expandedHandleIds.Clear();
+                    if (!wasExpanded) expandedHandleIds.Add(card.VirtualId!);
                     RenderTextures();
                 };
                 flowLayoutPanel.Controls.Add(folderCard);
 
-                // If expanded, add sub-grid of textures
-                if (isExpanded && ytd.TextureDict?.Textures?.data_items != null)
+                if (isExpanded && handle.Textures.Count > 0)
                 {
-                    var texturesInYtd = new System.Collections.Generic.List<CodeWalker.GameFiles.Texture>();
-                    foreach (var tex in ytd.TextureDict.Textures.data_items)
+                    var filtered = new System.Collections.Generic.List<TextureInfo>();
+                    foreach (var tex in handle.Textures)
                     {
                         if (string.IsNullOrEmpty(currentSearch) || tex.Name.ToLowerInvariant().Contains(currentSearch))
-                        {
-                            texturesInYtd.Add(tex);
-                        }
+                            filtered.Add(tex);
                     }
+                    filtered.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+                    totalVisibleTextures += filtered.Count;
 
-                    texturesInYtd.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
-                    totalVisibleTextures += texturesInYtd.Count;
-
-                    if (texturesInYtd.Count > 0)
+                    if (filtered.Count > 0)
                     {
-                        // Sub-grid for textures
                         FlowLayoutPanel subGrid = new FlowLayoutPanel();
                         subGrid.FlowDirection = FlowDirection.LeftToRight;
                         subGrid.WrapContents = true;
                         subGrid.AutoSize = true;
                         subGrid.Width = targetWidth;
-                        subGrid.Padding = new Padding(24, 12, 0, 24); // Indent textures
+                        subGrid.Padding = new Padding(24, 12, 0, 24);
                         subGrid.BackColor = Color.Transparent;
 
-                        foreach (var tex in texturesInYtd)
-                        {
-                            AddTextureToGrid(tex, ytd, subGrid);
-                        }
+                        foreach (var tex in filtered)
+                            AddTextureToGrid(tex, handle, subGrid);
                         flowLayoutPanel.Controls.Add(subGrid);
                     }
                 }
             }
-            
+
             if (statusLabel != null)
-            {
-               statusLabel.Text = $"Loaded {loadedYtds.Count} files. Showing {totalVisibleTextures} textures.";
-            }
+                statusLabel.Text = $"[{backend.BackendName}] Loaded {loadedHandles.Count} files. Showing {totalVisibleTextures} textures.";
 
             flowLayoutPanel.ResumeLayout();
-            try { flowLayoutPanel.VerticalScroll.Value = Math.Min(scrollY, flowLayoutPanel.VerticalScroll.Maximum); } catch {}
+            try { flowLayoutPanel.VerticalScroll.Value = Math.Min(scrollY, flowLayoutPanel.VerticalScroll.Maximum); } catch { }
         }
 
-        private void AddTextureToGrid(Texture tex, YtdFile parent, FlowLayoutPanel targetGrid)
+        private void AddTextureToGrid(TextureInfo tex, YtdHandle parent, FlowLayoutPanel targetGrid)
         {
             try
             {
@@ -648,24 +683,21 @@ namespace EasyOptimizerV
                 if (currentPreviewRes == "Native") nativeSize = true;
                 else int.TryParse(currentPreviewRes, out previewSize);
 
-                // Get pixels (mip 0)
-                byte[] pixels = DDSIO.GetPixels(tex, 0);
+                byte[]? pixels = backend.GetPixels(parent, tex.Name, 0);
                 if (pixels == null) return;
 
                 int width = tex.Width;
                 int height = tex.Height;
 
-                // Create Original Bitmap
                 using (Bitmap originalBmp = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
                 {
                     var data = originalBmp.LockBits(new Rectangle(0, 0, width, height), System.Drawing.Imaging.ImageLockMode.WriteOnly, originalBmp.PixelFormat);
-                    System.Runtime.InteropServices.Marshal.Copy(pixels, 0, data.Scan0, pixels.Length);
+                    System.Runtime.InteropServices.Marshal.Copy(pixels, 0, data.Scan0, Math.Min(pixels.Length, data.Stride * height));
                     originalBmp.UnlockBits(data);
 
                     int displayW = nativeSize ? width : previewSize;
                     int displayH = nativeSize ? height : previewSize;
-                    
-                    // Maintain aspect ratio if not native
+
                     if (!nativeSize)
                     {
                         float ratio = (float)width / height;
@@ -675,17 +707,14 @@ namespace EasyOptimizerV
 
                     Bitmap displayBmp = new Bitmap(originalBmp, displayW, displayH);
 
-                    // Create UI Component: Modern Texture Card
                     var card = new TextureCard(tex, displayBmp, parent);
                     card.OnResizeRequested += (t) => ResizeTexture_Click(t, parent);
-                    
-                    // Set current size based on global state
-                    Size newSize = new Size(220, 260); 
+
+                    Size newSize = new Size(220, 260);
                     if (currentPreviewRes == "128") newSize = new Size(160, 200);
                     else if (currentPreviewRes == "Native") newSize = new Size(300, 340);
                     card.Size = newSize;
 
-                    // Context Menu
                     var ctx = new ContextMenuStrip();
                     var darkRenderer = new ToolStripProfessionalRenderer(new DarkColorTable());
                     ctx.Renderer = darkRenderer;
@@ -694,18 +723,17 @@ namespace EasyOptimizerV
                     var resizeItem = new ToolStripMenuItem("Resize...", null, (s, e) => ResizeTexture_Click(tex, parent));
                     resizeItem.ForeColor = Color.White;
                     ctx.Items.Add(resizeItem);
-                    
+
                     card.ContextMenuStrip = ctx;
                     targetGrid.Controls.Add(card);
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                // Silent fail for single texture load error to keep UI moving
             }
         }
 
-        private void ResizeTexture_Click(Texture tex, YtdFile parent)
+        private void ResizeTexture_Click(TextureInfo tex, YtdHandle parent)
         {
             using (var dialog = new ResizeDialog(tex.Width, tex.Height))
             {
@@ -716,27 +744,33 @@ namespace EasyOptimizerV
             }
         }
 
-        private void PerformTextureResize(Texture tex, YtdFile parent, int newWidth, int newHeight, string formatSelection, int desiredMips)
+        private byte[]? DecodeTexturePixels(TextureInfo tex, YtdHandle parent)
         {
-            try
-            {
-                // 1. Decode Texture
-                byte[] rawBgraPixels = null;
-                try {
-                    CompressionFormat? inputFormat = null;
-                    if (tex.Format == TextureFormat.D3DFMT_DXT1) inputFormat = CompressionFormat.Bc1;
-                    else if (tex.Format == TextureFormat.D3DFMT_DXT3) inputFormat = CompressionFormat.Bc2;
-                    else if (tex.Format == TextureFormat.D3DFMT_DXT5) inputFormat = CompressionFormat.Bc3;
-                    else if (tex.Format == TextureFormat.D3DFMT_ATI1) inputFormat = CompressionFormat.Bc4;
-                    else if (tex.Format == TextureFormat.D3DFMT_ATI2) inputFormat = CompressionFormat.Bc5;
-                    else if (tex.Format.ToString().Contains("BC7")) inputFormat = CompressionFormat.Bc7;
+            byte[]? rawBgraPixels = null;
 
-                    if (inputFormat.HasValue && tex.Data?.FullData != null) {
+            byte[]? texData = backend.GetTextureData(parent, tex.Name);
+            if (texData != null)
+            {
+                try
+                {
+                    TextureFormat cwFormat = Mapping.ParseFormat(tex.Format, TextureFormat.D3DFMT_DXT5);
+                    CompressionFormat? inputFormat = null;
+                    if (cwFormat == TextureFormat.D3DFMT_DXT1) inputFormat = CompressionFormat.Bc1;
+                    else if (cwFormat == TextureFormat.D3DFMT_DXT3) inputFormat = CompressionFormat.Bc2;
+                    else if (cwFormat == TextureFormat.D3DFMT_DXT5) inputFormat = CompressionFormat.Bc3;
+                    else if (cwFormat == TextureFormat.D3DFMT_ATI1) inputFormat = CompressionFormat.Bc4;
+                    else if (cwFormat == TextureFormat.D3DFMT_ATI2) inputFormat = CompressionFormat.Bc5;
+                    else if (tex.Format.Contains("BC7")) inputFormat = CompressionFormat.Bc7;
+
+                    if (inputFormat.HasValue)
+                    {
                         var decoder = new BcDecoder();
-                        var decodedColors = decoder.DecodeRaw(tex.Data.FullData, tex.Width, tex.Height, inputFormat.Value);
-                        if (decodedColors != null) {
+                        var decodedColors = decoder.DecodeRaw(texData, tex.Width, tex.Height, inputFormat.Value);
+                        if (decodedColors != null)
+                        {
                             rawBgraPixels = new byte[decodedColors.Length * 4];
-                            for (int i = 0; i < decodedColors.Length; i++) {
+                            for (int i = 0; i < decodedColors.Length; i++)
+                            {
                                 var color = decodedColors[i];
                                 int offset = i * 4;
                                 rawBgraPixels[offset] = color.b;
@@ -746,19 +780,38 @@ namespace EasyOptimizerV
                             }
                         }
                     }
-                } catch { }
-
-                if (rawBgraPixels == null) {
-                    byte[] cwPixels = DDSIO.GetPixels(tex, 0);
-                    if (cwPixels != null) rawBgraPixels = cwPixels;
                 }
+                catch { }
+            }
 
+            if (rawBgraPixels == null)
+                rawBgraPixels = backend.GetPixels(parent, tex.Name, 0);
+
+            return rawBgraPixels;
+        }
+
+        private int CalculateStride(string formatName, int width)
+        {
+            TextureFormat fmt = Mapping.ParseFormat(formatName, TextureFormat.D3DFMT_DXT5);
+            if (Mapping.IsCompressed(fmt))
+            {
+                int blocksWide = Math.Max(1, (width + 3) / 4);
+                int blockSize = (fmt == TextureFormat.D3DFMT_DXT1 || fmt == TextureFormat.D3DFMT_ATI1) ? 8 : 16;
+                return blocksWide * blockSize;
+            }
+            int bpp = (fmt == TextureFormat.D3DFMT_A1R5G5B5) ? 2 : ((fmt == TextureFormat.D3DFMT_A8) ? 1 : 4);
+            return width * bpp;
+        }
+
+        private void PerformTextureResize(TextureInfo tex, YtdHandle parent, int newWidth, int newHeight, string formatSelection, int desiredMips)
+        {
+            try
+            {
+                byte[]? rawBgraPixels = DecodeTexturePixels(tex, parent);
                 if (rawBgraPixels == null) throw new Exception("Could not decode texture.");
 
-                // 2. Determine Original Formats
-                TextureFormat targetFormat = Mapping.ParseFormat(formatSelection, tex.Format);
+                TextureFormat targetFormat = Mapping.ParseFormat(formatSelection, Mapping.ParseFormat(tex.Format, TextureFormat.D3DFMT_DXT5));
 
-                // 3. Create Resized Bitmap
                 using (Bitmap fullBmp = new Bitmap(tex.Width, tex.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
                 {
                     var bmpData = fullBmp.LockBits(new Rectangle(0, 0, tex.Width, tex.Height), System.Drawing.Imaging.ImageLockMode.WriteOnly, fullBmp.PixelFormat);
@@ -767,12 +820,13 @@ namespace EasyOptimizerV
 
                     using (Bitmap resizedBmp = new Bitmap(newWidth, newHeight, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
                     {
-                        using (Graphics g = Graphics.FromImage(resizedBmp)) {
+                        using (Graphics g = Graphics.FromImage(resizedBmp))
+                        {
                             g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
                             g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
                             g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
-                            
+
                             using (var wrapMode = new System.Drawing.Imaging.ImageAttributes())
                             {
                                 wrapMode.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);
@@ -780,32 +834,16 @@ namespace EasyOptimizerV
                             }
                         }
 
-                        // 4. Encode using selected engine
                         int mipsGenerated = 0;
                         int mipLimit = desiredMips == -2 ? tex.Levels : (desiredMips == -1 ? 99 : (desiredMips == 0 ? 1 : desiredMips));
-                        
+
                         var encoder = EncoderManager.GetEncoder(selectedEngine);
                         byte[] fullData = encoder.Encode(resizedBmp, targetFormat, mipLimit, out mipsGenerated);
 
-                        // 5. Update Texture
-                        int oldSize = tex.Data?.FullData?.Length ?? 0;
-                        tex.Width = (ushort)newWidth;
-                        tex.Height = (ushort)newHeight;
-                        tex.Levels = (byte)mipsGenerated;
-                        tex.Format = targetFormat;
-                        
-                        if (tex.Data == null) tex.Data = new TextureData();
-                        tex.Data.FullData = fullData;
+                        int oldSize = tex.DataSize;
+                        int stride = CalculateStride(targetFormat.ToString(), newWidth);
 
-                        // Stride calculation
-                        if (Mapping.IsCompressed(targetFormat)) {
-                            int blocksWide = Math.Max(1, (newWidth + 3) / 4);
-                            int blockSize = (targetFormat == TextureFormat.D3DFMT_DXT1 || targetFormat == TextureFormat.D3DFMT_ATI1) ? 8 : 16;
-                            tex.Stride = (ushort)(blocksWide * blockSize);
-                        } else {
-                            int bpp = (targetFormat == TextureFormat.D3DFMT_A1R5G5B5) ? 2 : ((targetFormat == TextureFormat.D3DFMT_A8) ? 1 : 4);
-                            tex.Stride = (ushort)(newWidth * bpp);
-                        }
+                        backend.UpdateTexture(parent, tex.Name, newWidth, newHeight, targetFormat.ToString(), mipsGenerated, stride, fullData);
 
                         RenderTextures();
                         MessageBox.Show($"Resized to {newWidth}x{newHeight} using {selectedEngine}.\nFormat: {targetFormat}, Mips: {mipsGenerated}\nSize: {oldSize:N0} -> {fullData.Length:N0} bytes");
@@ -819,22 +857,17 @@ namespace EasyOptimizerV
         }
         private void SmartOptimize_Click()
         {
-            if (expandedYtds.Count == 0 && loadedYtds.Count > 0)
+            YtdHandle? targetHandle = null;
+            if (expandedHandleIds.Count == 1)
             {
-                // If nothing expanded, pick the first one or ask? 
-                // Let's optimize the currently expanded or all? 
-                // User said "otimizar todo o arquivo", usually referring to the one they are looking at.
-                // If none expanded, we'll ask which one or just do all.
+                string expandedId = "";
+                foreach (var id in expandedHandleIds) expandedId = id;
+                targetHandle = loadedHandles.Find(h => h.Id == expandedId);
             }
 
-            YtdFile? targetYtd = null;
-            if (expandedYtds.Count == 1) {
-                foreach (var y in expandedYtds) targetYtd = y;
-            }
+            if (targetHandle == null && loadedHandles.Count == 1) targetHandle = loadedHandles[0];
 
-            if (targetYtd == null && loadedYtds.Count == 1) targetYtd = loadedYtds[0];
-
-            if (targetYtd == null)
+            if (targetHandle == null)
             {
                 MessageBox.Show("Please expand a YTD file folder to optimize it, or load only one file.", "Smart Optimize", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
@@ -844,81 +877,65 @@ namespace EasyOptimizerV
             {
                 if (dialog.ShowDialog() == DialogResult.OK)
                 {
-                    PerformSmartOptimize(targetYtd, dialog.OptimizeBySize, dialog.TargetMiB, dialog.MaxResolution, dialog.PreferredFormat);
+                    PerformSmartOptimize(targetHandle, dialog.OptimizeBySize, dialog.TargetMiB, dialog.MaxResolution, dialog.PreferredFormat);
                 }
             }
         }
 
-        private float CalculateTotalMiB(YtdFile ytd)
+        private float CalculateTotalMiB(YtdHandle handle)
         {
-            if (ytd.TextureDict?.Textures?.data_items == null) return 0;
             long totalBytes = 0;
-            foreach (var tex in ytd.TextureDict.Textures.data_items)
-            {
-                if (tex.Data?.FullData != null)
-                    totalBytes += tex.Data.FullData.Length;
-            }
+            foreach (var tex in handle.Textures)
+                totalBytes += tex.DataSize;
             return totalBytes / 1024f / 1024f;
         }
 
-        private void PerformSmartOptimize(YtdFile ytd, bool bySize, float targetMiB, int maxRes, string prefFormat)
+        private void PerformSmartOptimize(YtdHandle handle, bool bySize, float targetMiB, int maxRes, string prefFormat)
         {
-            if (ytd.TextureDict?.Textures?.data_items == null) return;
-            var textures = new System.Collections.Generic.List<CodeWalker.GameFiles.Texture>(ytd.TextureDict.Textures.data_items);
-            
+            if (handle.Textures.Count == 0) return;
+
             int optimizedCount = 0;
-            float startMiB = CalculateTotalMiB(ytd);
+            float startMiB = CalculateTotalMiB(handle);
 
             try
             {
                 if (bySize)
                 {
-                    while (CalculateTotalMiB(ytd) > targetMiB)
+                    while (CalculateTotalMiB(handle) > targetMiB)
                     {
-                        // Find largest texture that is still reducible (min 16x16)
-                        textures.Sort((a, b) => (b.Data?.FullData?.Length ?? 0).CompareTo(a.Data?.FullData?.Length ?? 0));
-                        
-                        CodeWalker.GameFiles.Texture? toReduce = null;
-                        foreach (var t in textures)
-                        {
-                            if (t.Width > 16 && t.Height > 16) {
-                                toReduce = t;
-                                break;
-                            }
-                        }
+                        var sorted = new System.Collections.Generic.List<TextureInfo>(handle.Textures);
+                        sorted.Sort((a, b) => b.DataSize.CompareTo(a.DataSize));
 
-                        if (toReduce == null) break; // Nothing left to reduce
+                        TextureInfo? toReduce = null;
+                        foreach (var t in sorted)
+                        {
+                            if (t.Width > 16 && t.Height > 16) { toReduce = t; break; }
+                        }
+                        if (toReduce == null) break;
 
                         int nw = Math.Max(16, toReduce.Width / 2);
                         int nh = Math.Max(16, toReduce.Height / 2);
-                        
-                        // Use existing resize logic but suppress UI
-                        InternalResizeTexture(toReduce, ytd, nw, nh, prefFormat, -1);
+                        InternalResizeTexture(toReduce, handle, nw, nh, prefFormat, -1);
                         optimizedCount++;
                     }
                 }
                 else
                 {
-                    foreach (var tex in textures)
+                    foreach (var tex in new System.Collections.Generic.List<TextureInfo>(handle.Textures))
                     {
                         if (tex.Width > maxRes || tex.Height > maxRes)
                         {
                             float ratio = (float)tex.Width / tex.Height;
                             int nw, nh;
-                            if (ratio >= 1) {
-                                nw = maxRes;
-                                nh = (int)Math.Round(maxRes / ratio);
-                            } else {
-                                nh = maxRes;
-                                nw = (int)Math.Round(maxRes * ratio);
-                            }
-                            InternalResizeTexture(tex, ytd, nw, nh, prefFormat, -1);
+                            if (ratio >= 1) { nw = maxRes; nh = (int)Math.Round(maxRes / ratio); }
+                            else { nh = maxRes; nw = (int)Math.Round(maxRes * ratio); }
+                            InternalResizeTexture(tex, handle, nw, nh, prefFormat, -1);
                             optimizedCount++;
                         }
                     }
                 }
 
-                float endMiB = CalculateTotalMiB(ytd);
+                float endMiB = CalculateTotalMiB(handle);
                 RenderTextures();
                 MessageBox.Show($"Smart Optimization Complete!\nTextures affected: {optimizedCount}\nSize: {startMiB:F2} MiB -> {endMiB:F2} MiB", "Smart Optimize", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -928,123 +945,73 @@ namespace EasyOptimizerV
             }
         }
 
-        private void InternalResizeTexture(CodeWalker.GameFiles.Texture tex, YtdFile parent, int newWidth, int newHeight, string formatSelection, int desiredMips)
+        private void InternalResizeTexture(TextureInfo tex, YtdHandle parent, int newWidth, int newHeight, string formatSelection, int desiredMips)
         {
-             // Copy of PerformTextureResize logic but without UI messages
-             // 1. Decode Texture
-             byte[] rawBgraPixels = null;
-             try {
-                 CompressionFormat? inputFormat = null;
-                 if (tex.Format == TextureFormat.D3DFMT_DXT1) inputFormat = CompressionFormat.Bc1;
-                 else if (tex.Format == TextureFormat.D3DFMT_DXT3) inputFormat = CompressionFormat.Bc2;
-                 else if (tex.Format == TextureFormat.D3DFMT_DXT5) inputFormat = CompressionFormat.Bc3;
-                 else if (tex.Format == TextureFormat.D3DFMT_ATI1) inputFormat = CompressionFormat.Bc4;
-                 else if (tex.Format == TextureFormat.D3DFMT_ATI2) inputFormat = CompressionFormat.Bc5;
-                 else if (tex.Format.ToString().Contains("BC7")) inputFormat = CompressionFormat.Bc7;
+            byte[]? rawBgraPixels = DecodeTexturePixels(tex, parent);
+            if (rawBgraPixels == null) return;
 
-                 if (inputFormat.HasValue && tex.Data?.FullData != null) {
-                     var decoder = new BcDecoder();
-                     var decodedColors = decoder.DecodeRaw(tex.Data.FullData, tex.Width, tex.Height, inputFormat.Value);
-                     if (decodedColors != null) {
-                         rawBgraPixels = new byte[decodedColors.Length * 4];
-                         for (int i = 0; i < decodedColors.Length; i++) {
-                             var color = decodedColors[i];
-                             int offset = i * 4;
-                             rawBgraPixels[offset] = color.b;
-                             rawBgraPixels[offset + 1] = color.g;
-                             rawBgraPixels[offset + 2] = color.r;
-                             rawBgraPixels[offset + 3] = color.a;
-                         }
-                     }
-                 }
-             } catch { }
+            TextureFormat targetFormat = Mapping.ParseFormat(formatSelection, Mapping.ParseFormat(tex.Format, TextureFormat.D3DFMT_DXT5));
 
-             if (rawBgraPixels == null) {
-                 byte[] cwPixels = DDSIO.GetPixels(tex, 0);
-                 if (cwPixels != null) rawBgraPixels = cwPixels;
-             }
+            using (Bitmap fullBmp = new Bitmap(tex.Width, tex.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                var bmpData = fullBmp.LockBits(new Rectangle(0, 0, tex.Width, tex.Height), System.Drawing.Imaging.ImageLockMode.WriteOnly, fullBmp.PixelFormat);
+                System.Runtime.InteropServices.Marshal.Copy(rawBgraPixels, 0, bmpData.Scan0, Math.Min(rawBgraPixels.Length, bmpData.Stride * tex.Height));
+                fullBmp.UnlockBits(bmpData);
 
-             if (rawBgraPixels == null) return;
+                using (Bitmap resizedBmp = new Bitmap(newWidth, newHeight, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                {
+                    using (Graphics g = Graphics.FromImage(resizedBmp))
+                    {
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                        g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
 
-             // 2. Determine Target Format
-             TextureFormat targetFormat = Mapping.ParseFormat(formatSelection, tex.Format);
+                        using (var wrapMode = new System.Drawing.Imaging.ImageAttributes())
+                        {
+                            wrapMode.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);
+                            g.DrawImage(fullBmp, new Rectangle(0, 0, newWidth, newHeight), 0, 0, fullBmp.Width, fullBmp.Height, GraphicsUnit.Pixel, wrapMode);
+                        }
+                    }
 
-             // 3. Create Resized Bitmap
-             using (Bitmap fullBmp = new Bitmap(tex.Width, tex.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
-             {
-                 var bmpData = fullBmp.LockBits(new Rectangle(0, 0, tex.Width, tex.Height), System.Drawing.Imaging.ImageLockMode.WriteOnly, fullBmp.PixelFormat);
-                 System.Runtime.InteropServices.Marshal.Copy(rawBgraPixels, 0, bmpData.Scan0, Math.Min(rawBgraPixels.Length, bmpData.Stride * tex.Height));
-                 fullBmp.UnlockBits(bmpData);
+                    int mipsGenerated = 0;
+                    int mipLimit = desiredMips == -2 ? tex.Levels : (desiredMips == -1 ? 99 : (desiredMips == 0 ? 1 : desiredMips));
 
-                 using (Bitmap resizedBmp = new Bitmap(newWidth, newHeight, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
-                 {
-                     using (Graphics g = Graphics.FromImage(resizedBmp)) {
-                         g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
-                         g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-                         g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
-                         
-                         using (var wrapMode = new System.Drawing.Imaging.ImageAttributes())
-                         {
-                             wrapMode.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);
-                             g.DrawImage(fullBmp, new Rectangle(0, 0, newWidth, newHeight), 0, 0, fullBmp.Width, fullBmp.Height, GraphicsUnit.Pixel, wrapMode);
-                         }
-                     }
+                    var encoder = EncoderManager.GetEncoder(selectedEngine);
+                    byte[] fullData = encoder.Encode(resizedBmp, targetFormat, mipLimit, out mipsGenerated);
 
-                     int mipsGenerated = 0;
-                     int mipLimit = desiredMips == -2 ? tex.Levels : (desiredMips == -1 ? 99 : (desiredMips == 0 ? 1 : desiredMips));
-                     
-                     var encoder = EncoderManager.GetEncoder(selectedEngine);
-                     byte[] fullData = encoder.Encode(resizedBmp, targetFormat, mipLimit, out mipsGenerated);
-
-                     tex.Width = (ushort)newWidth;
-                     tex.Height = (ushort)newHeight;
-                     tex.Levels = (byte)mipsGenerated;
-                     tex.Format = targetFormat;
-                     if (tex.Data == null) tex.Data = new TextureData();
-                     tex.Data.FullData = fullData;
-
-                     if (Mapping.IsCompressed(targetFormat)) {
-                         int blocksWide = Math.Max(1, (newWidth + 3) / 4);
-                         int blockSize = (targetFormat == TextureFormat.D3DFMT_DXT1 || targetFormat == TextureFormat.D3DFMT_ATI1) ? 8 : 16;
-                         tex.Stride = (ushort)(blocksWide * blockSize);
-                     } else {
-                         int bpp = (targetFormat == TextureFormat.D3DFMT_A1R5G5B5) ? 2 : ((targetFormat == TextureFormat.D3DFMT_A8) ? 1 : 4);
-                         tex.Stride = (ushort)(newWidth * bpp);
-                     }
-                 }
-             }
+                    int stride = CalculateStride(targetFormat.ToString(), newWidth);
+                    backend.UpdateTexture(parent, tex.Name, newWidth, newHeight, targetFormat.ToString(), mipsGenerated, stride, fullData);
+                }
+            }
         }
 
         private void PerformDeDuplicationAnalysis(bool byName, bool byHex)
         {
-            if (loadedYtds.Count == 0) return;
-            
+            if (loadedHandles.Count == 0) return;
+
             duplicateGroups.Clear();
-            var allTextures = new System.Collections.Generic.List<(Texture tex, YtdFile ytd)>();
-            
-            foreach (var ytd in loadedYtds)
+            var allTextures = new System.Collections.Generic.List<(TextureInfo tex, YtdHandle handle)>();
+
+            foreach (var handle in loadedHandles)
             {
-                if (ytd.TextureDict?.Textures?.data_items != null)
-                {
-                    foreach (var tex in ytd.TextureDict.Textures.data_items)
-                        allTextures.Add((tex, ytd));
-                }
+                foreach (var tex in handle.Textures)
+                    allTextures.Add((tex, handle));
             }
 
-            var groups = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<(Texture, YtdFile)>>(StringComparer.OrdinalIgnoreCase);
+            var groups = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<(TextureInfo, YtdHandle)>>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var item in allTextures)
             {
                 string key = "";
                 if (byName) key = item.tex.Name;
-                else if (byHex) key = GetTextureHash(item.tex);
+                else if (byHex) key = GetTextureHash(item.tex, item.handle);
 
                 if (string.IsNullOrEmpty(key)) continue;
 
                 if (!groups.ContainsKey(key))
-                    groups[key] = new System.Collections.Generic.List<(Texture, YtdFile)>();
-                
+                    groups[key] = new System.Collections.Generic.List<(TextureInfo, YtdHandle)>();
+
                 groups[key].Add(item);
             }
 
@@ -1059,7 +1026,7 @@ namespace EasyOptimizerV
             }
 
             showingDuplicates = true;
-            expandedYtds.Clear();
+            expandedHandleIds.Clear();
             RenderTextures();
 
             string modeStr = byHex ? "Hex (Conteúdo)" : "Nome";
@@ -1067,12 +1034,13 @@ namespace EasyOptimizerV
             if (statusLabel != null) statusLabel.Text = $"Encontrados {dupCount} grupos duplicados ({modeStr})";
         }
 
-        private string GetTextureHash(Texture tex)
+        private string GetTextureHash(TextureInfo tex, YtdHandle handle)
         {
-            if (tex.Data?.FullData == null) return "";
+            byte[]? data = backend.GetTextureData(handle, tex.Name);
+            if (data == null) return "";
             using (SHA256 sha256 = SHA256.Create())
             {
-                byte[] hashBytes = sha256.ComputeHash(tex.Data.FullData);
+                byte[] hashBytes = sha256.ComputeHash(data);
                 return BitConverter.ToString(hashBytes).Replace("-", "").ToLower();
             }
         }
@@ -1090,71 +1058,40 @@ namespace EasyOptimizerV
 
             try
             {
-                // 1. Create the Consolidated YTD with proper structure
-                YtdFile consolidatedYtd = new YtdFile();
-                consolidatedYtd.Name = "consolidated_textures.ytd";
-                consolidatedYtd.TextureDict = new TextureDictionary();
-                consolidatedYtd.TextureDict.Textures = new ResourcePointerList64<Texture>();
-                consolidatedYtd.TextureDict.TextureNameHashes = new ResourceSimpleList64_uint();
-                
-                var newTextureList = new System.Collections.Generic.List<Texture>();
-                var newHashList = new System.Collections.Generic.List<uint>();
+                var consolidatedTextures = new System.Collections.Generic.List<(string name, uint nameHash, int width, int height, string format, int levels, int stride, byte[] data)>();
 
-                // 2. Process groups
                 foreach (var kvp in duplicateGroups)
                 {
                     if (kvp.Value == null || kvp.Value.Count == 0) continue;
 
-                    // Take the first one as master safely
-                    var masterItem = kvp.Value[0];
-                    if (masterItem.Item1 == null) continue;
-                    
-                    newTextureList.Add(masterItem.Item1);
-                    newHashList.Add(masterItem.Item1.NameHash);
+                    var masterTex = kvp.Value[0].Item1;
+                    var masterHandle = kvp.Value[0].Item2;
+                    byte[]? data = backend.GetTextureData(masterHandle, masterTex.Name);
+                    if (data == null) continue;
 
-                    // Remove from all originals
+                    consolidatedTextures.Add((masterTex.Name, masterTex.NameHash, masterTex.Width, masterTex.Height, masterTex.Format, masterTex.Levels, masterTex.Stride, data));
+
                     foreach (var occurrence in kvp.Value)
                     {
-                        var sourceYtd = occurrence.Item2;
-                        var sourceTex = occurrence.Item1;
-
-                        if (sourceYtd?.TextureDict?.Textures?.data_items != null)
-                        {
-                            var list = new System.Collections.Generic.List<Texture>(sourceYtd.TextureDict.Textures.data_items);
-                            list.Remove(sourceTex);
-                            sourceYtd.TextureDict.Textures.data_items = list.ToArray();
-                            
-                            // Also update hashes if present
-                            if (sourceYtd.TextureDict.TextureNameHashes?.data_items != null)
-                            {
-                                var hlist = new System.Collections.Generic.List<uint>(sourceYtd.TextureDict.TextureNameHashes.data_items);
-                                hlist.Remove(sourceTex.NameHash);
-                                sourceYtd.TextureDict.TextureNameHashes.data_items = hlist.ToArray();
-                            }
-                        }
+                        backend.RemoveTexture(occurrence.Item2, occurrence.Item1.Name);
                     }
                 }
 
-                consolidatedYtd.TextureDict.Textures.data_items = newTextureList.ToArray();
-                consolidatedYtd.TextureDict.TextureNameHashes.data_items = newHashList.ToArray();
+                var consolidatedHandle = backend.CreateYtd("consolidated_textures.ytd", consolidatedTextures);
 
-                // 3. Save the new file
                 SaveFileDialog sfd = new SaveFileDialog();
                 sfd.FileName = "consolidated_textures.ytd";
                 sfd.Filter = "YTD Files (*.ytd)|*.ytd";
                 if (sfd.ShowDialog() == DialogResult.OK)
                 {
-                    byte[] savedData = consolidatedYtd.Save();
-                    if (savedData == null) throw new Exception("Failed to generate YTD data (Save returned null).");
-                    
+                    byte[] savedData = backend.SaveYtd(consolidatedHandle);
                     File.WriteAllBytes(sfd.FileName, savedData);
-                    
-                    // Add it to our session too
-                    loadedYtds.Add(consolidatedYtd);
-                    ytdFilePaths[consolidatedYtd] = sfd.FileName;
+
+                    consolidatedHandle.FilePath = sfd.FileName;
+                    loadedHandles.Add(consolidatedHandle);
 
                     MessageBox.Show("Migration complete! Duplicate textures have been consolidated and original files optimized.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    
+
                     duplicateGroups.Clear();
                     showingDuplicates = false;
                     expandedVirtualFolders.Clear();
