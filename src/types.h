@@ -43,7 +43,8 @@ typedef struct {
 
 typedef enum {
     ARCHIVE_YTD,
-    ARCHIVE_WTD
+    ARCHIVE_WTD,
+    ARCHIVE_MODEL_READONLY
 } ArchiveType;
 
 typedef struct {

@@ -320,13 +320,14 @@ YtdFile *ytd_load(const wchar_t *filepath) {
     LOG("ytd_load: texture count=%u items_ptr=0x%llX", count, (unsigned long long)items_ptr);
     if (count == 0 || count > 4096) { LOG_ERR("ytd_load: invalid count %u", count); free(payload); return NULL; }
 
+    if (items_ptr < VIRTUAL_BASE) { LOG_ERR("ytd_load: invalid items pointer"); free(payload); return NULL; }
     size_t items_off = (size_t)(items_ptr - VIRTUAL_BASE);
     if (items_off + count * 8 > vdata_len) { LOG_ERR("ytd_load: items_off out of bounds (%zu + %u*8 > %zu)", items_off, count, vdata_len); free(payload); return NULL; }
 
     YtdFile *ytd = (YtdFile *)calloc(1, sizeof(YtdFile));
     ytd->type = ARCHIVE_YTD;
     ytd->textures = (TextureEntry *)calloc(count, sizeof(TextureEntry));
-    ytd->texture_count = count;
+    ytd->texture_count = 0;
 
     const wchar_t *wfname = wcsrchr(filepath, L'\\');
     if (!wfname) wfname = wcsrchr(filepath, L'/');
@@ -337,12 +338,16 @@ YtdFile *ytd_load(const wchar_t *filepath) {
 
     for (int i = 0; i < count; i++) {
         uint64_t tex_ptr = rd64(vdata + items_off + i * 8);
+        if (tex_ptr < VIRTUAL_BASE) continue;
         size_t tex_off = (size_t)(tex_ptr - VIRTUAL_BASE);
         if (tex_off + tex_struct_size > vdata_len) continue;
 
         uint64_t name_ptr = rd64(vdata + tex_off + 0x28);
+        if (name_ptr < VIRTUAL_BASE) continue;
         size_t name_off = (size_t)(name_ptr - VIRTUAL_BASE);
+        if (name_off >= vdata_len) continue;
         char *name = read_cstring(vdata, name_off, vdata_len);
+        if (!name) continue;
 
         int16_t w, h, stride;
         uint32_t fmt_val;
@@ -376,9 +381,17 @@ YtdFile *ytd_load(const wchar_t *filepath) {
         }
 
         size_t data_size = tex_total_mip_size(w, h, fmt, mip_count);
+        if (data_ptr < PHYSICAL_BASE) {
+            free(name);
+            continue;
+        }
         size_t phys_off = (size_t)(data_ptr - PHYSICAL_BASE);
+        if (phys_off > pdata_len || data_size > pdata_len - phys_off) {
+            free(name);
+            continue;
+        }
 
-        TextureEntry *te = &ytd->textures[i];
+        TextureEntry *te = &ytd->textures[ytd->texture_count];
         strncpy(te->name, name, EO_MAX_NAME - 1);
         te->name_hash = jenk_hash(name);
         te->width = w;
@@ -389,15 +402,22 @@ YtdFile *ytd_load(const wchar_t *filepath) {
         te->data_size = data_size;
         te->data = (uint8_t *)malloc(data_size);
 
-        if (phys_off + data_size <= pdata_len) {
-            memcpy(te->data, pdata + phys_off, data_size);
-        } else {
-            memset(te->data, 0, data_size);
+        if (!te->data) {
+            free(name);
+            continue;
         }
+        memcpy(te->data, pdata + phys_off, data_size);
+        ytd->texture_count++;
         free(name);
     }
 
     free(payload);
+    if (ytd->texture_count == 0) {
+        free(ytd->textures);
+        free(ytd);
+        LOG_ERR("ytd_load: no valid textures");
+        return NULL;
+    }
     LOG("ytd_load: loaded %d textures from '%s'", ytd->texture_count, ytd->name);
     return ytd;
 }
@@ -413,6 +433,14 @@ static int sort_by_hash(const void *a, const void *b) {
 
 bool ytd_save(YtdFile *ytd, const wchar_t *filepath) {
     if (!ytd || ytd->texture_count == 0) { LOG_ERR("ytd_save: empty ytd"); return false; }
+    for (int i = 0; i < ytd->texture_count; i++) {
+        TextureEntry *te = &ytd->textures[i];
+        if (!te->data || te->data_size == 0 || te->name[0] == 0 ||
+            te->format == TEX_FMT_UNKNOWN || format_to_dx9(te->format) == 0) {
+            LOG_ERR("ytd_save: invalid texture at index %d", i);
+            return false;
+        }
+    }
     LOG("ytd_save: saving '%s' (%d textures)", ytd->name, ytd->texture_count);
     int count = ytd->texture_count;
 

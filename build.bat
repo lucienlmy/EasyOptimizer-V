@@ -9,13 +9,13 @@ if %errorlevel% neq 0 (
 
 if not exist "build" mkdir build
 
-set COMMON=/nologo /O2 /W3 /MD /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS
+set COMMON=/nologo /O2 /W3 /MD /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS
 set CFLAGS=%COMMON% /I vendor\bc7enc_rdo
 set CXXFLAGS=%COMMON% /EHsc /std:c++14 /DSUPPORT_BC7E=1
 
 set LDFLAGS=/link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib shlwapi.lib msimg32.lib bcrypt.lib
 
-set C_SOURCES=src\main.c src\theme.c src\hash.c src\ytd.c src\wtd.c src\dds.c src\texture.c src\gui.c src\gui_cards.c src\ydr.c src\optimizer.c src\nvtt_c_wrapper.c
+set C_SOURCES=src\main.c src\theme.c src\hash.c src\ytd.c src\wtd.c src\dds.c src\texture.c src\image.c src\gui.c src\gui_cards.c src\ydr.c src\optimizer.c src\nvtt_c_wrapper.c
 
 set CXX_SOURCES=src\bc7enc_wrapper.cpp vendor\bc7enc_rdo\bc7enc.cpp vendor\bc7enc_rdo\bc7decomp.cpp vendor\bc7enc_rdo\bc7decomp_ref.cpp vendor\bc7enc_rdo\rgbcx.cpp vendor\bc7enc_rdo\rdo_bc_encoder.cpp vendor\bc7enc_rdo\ert.cpp vendor\bc7enc_rdo\utils.cpp vendor\bc7enc_rdo\lodepng.cpp
 

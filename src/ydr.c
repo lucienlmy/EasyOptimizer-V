@@ -86,6 +86,7 @@ static TexFormat resolve_dx9_format(uint32_t val) {
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
 static char *read_cstring(const uint8_t *data, size_t offset, size_t max) {
+    if (offset >= max) return NULL;
     const uint8_t *start = data + offset;
     size_t len = 0;
     while (offset + len < max && start[len]) len++;
@@ -154,10 +155,12 @@ static int parse_texdict(const uint8_t *vdata, size_t vdata_len,
     int loaded = 0;
     for (int i = 0; i < count && loaded < max_textures; i++) {
         uint64_t tex_ptr = rd64(vdata + items_off + i * 8);
+        if (tex_ptr < VIRTUAL_BASE) continue;
         size_t tex_off = (size_t)(tex_ptr - VIRTUAL_BASE);
         if (tex_off + GTAV_TEX_SIZE > vdata_len) continue;
 
         uint64_t name_ptr = rd64(vdata + tex_off + 0x28);
+        if (name_ptr < VIRTUAL_BASE) continue;
         size_t name_off = (size_t)(name_ptr - VIRTUAL_BASE);
         if (name_off >= vdata_len) continue;
         char *name = read_cstring(vdata, name_off, vdata_len);
@@ -177,7 +180,15 @@ static int parse_texdict(const uint8_t *vdata, size_t vdata_len,
         }
 
         size_t data_size = tex_total_mip_size(w, h, fmt, mip_count);
+        if (data_ptr < PHYSICAL_BASE) {
+            free(name);
+            continue;
+        }
         size_t phys_off = (size_t)(data_ptr - PHYSICAL_BASE);
+        if (phys_off > pdata_len || data_size > pdata_len - phys_off) {
+            free(name);
+            continue;
+        }
 
         TextureEntry *te = &out_textures[loaded];
         strncpy(te->name, name, EO_MAX_NAME - 1);
@@ -190,10 +201,10 @@ static int parse_texdict(const uint8_t *vdata, size_t vdata_len,
         te->data_size = data_size;
         te->data = (uint8_t *)malloc(data_size);
         if (te->data) {
-            if (phys_off + data_size <= pdata_len)
-                memcpy(te->data, pdata + phys_off, data_size);
-            else
-                memset(te->data, 0, data_size);
+            memcpy(te->data, pdata + phys_off, data_size);
+        } else {
+            free(name);
+            continue;
         }
         free(name);
         loaded++;
@@ -340,7 +351,7 @@ YtdFile *ydr_load(const wchar_t *filepath) {
         free(temp_textures); 
         return NULL; 
     }
-    ytd->type = ARCHIVE_YTD; /* Treat as YTD for editing/saving */
+    ytd->type = ARCHIVE_MODEL_READONLY;
     ytd->textures = (TextureEntry *)calloc(total_loaded, sizeof(TextureEntry));
     if (!ytd->textures) {
         for (int i = 0; i < total_loaded; i++) free(temp_textures[i].data);

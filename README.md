@@ -13,6 +13,22 @@ A high-performance GTA V texture optimizer written in pure C with Win32 GUI.
 - **Folder Scanner** — Recursively scan directories for all supported file types
 - **Drag & Drop** — Drop files directly into the window to load them
 
+- **Languages** - Switch the main interface between English, Portuguese, Spanish, and Russian
+
+## Saving
+
+`Save All` creates a versioned project cache under
+`projects\project-YYYYMMDD-HHMMSS-mmm\` next to the executable before writing
+files. It then offers:
+
+- **Yes** - replace original YTD/WTD files
+- **No** - save copies to another folder
+- **Cancel** - keep files unchanged
+
+The same popup also offers a cache-only snapshot without replacing files.
+YDR/YFT/YDD inputs are read-only models: their extracted textures can be saved
+as YTD copies, but the original model files are never overwritten.
+
 ## Building
 
 ### Requirements

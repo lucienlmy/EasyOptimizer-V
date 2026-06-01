@@ -32,6 +32,10 @@ AppState g_app = {0};
 #define ID_SIDEBAR_FASTRECOMP 1006
 #define ID_SIDEBAR_TOGGLE_ENC 1007
 #define ID_SIDEBAR_ADDFOLDER 1008
+#define ID_SAVE_REPLACE_ORIGINALS 4001
+#define ID_SAVE_TO_FOLDER         4002
+#define ID_SAVE_PROJECT_CACHE     4003
+#define ID_SIDEBAR_LANGUAGE       1009
 
 #define IDC_RES_MAXW 3011
 #define IDC_RES_MAXH 3012
@@ -84,6 +88,7 @@ static void layout_children(void);
 static void open_file_dialog(HWND parent);
 static void open_folder_dialog(HWND parent);
 static void save_all(void);
+static void save_project_cache(void);
 static void do_find_duplicates(void);
 static void do_smart_optimize(void);
 static void paint_content(HWND hwnd, HDC hdc);
@@ -96,6 +101,7 @@ static void do_fast_recompress(void);
 static void do_custom_resize(int ytd_idx, int tex_idx);
 static void do_texture_export_dds(int ytd_idx, int tex_idx);
 static void do_texture_remove(int ytd_idx, int tex_idx);
+static void select_language(void);
 
 /* ── Sidebar button struct ─────────────────────────────────────────── */
 
@@ -115,15 +121,51 @@ static SidebarButton g_sidebar_btns[] = {
     {{0}, ID_SIDEBAR_OPTIMIZE,   L"Smart Optimize", false},
     {{0}, ID_SIDEBAR_FASTRECOMP, L"Fast Recompress",false},
     {{0}, ID_SIDEBAR_TOGGLE_ENC, L"Encoder: CPU",   false},
+    {{0}, ID_SIDEBAR_LANGUAGE,   L"Language: English", false},
 };
 #define SIDEBAR_BTN_COUNT (sizeof(g_sidebar_btns)/sizeof(g_sidebar_btns[0]))
+
+typedef enum {
+    UI_LANG_ENGLISH,
+    UI_LANG_PORTUGUESE,
+    UI_LANG_SPANISH,
+    UI_LANG_RUSSIAN
+} AppLanguage;
+
+static AppLanguage g_language = UI_LANG_ENGLISH;
+
+static const wchar_t *trw(const wchar_t *en, const wchar_t *pt,
+                          const wchar_t *es, const wchar_t *ru) {
+    switch (g_language) {
+        case UI_LANG_PORTUGUESE: return pt;
+        case UI_LANG_SPANISH: return es;
+        case UI_LANG_RUSSIAN: return ru;
+        default: return en;
+    }
+}
+
+static void update_sidebar_labels(void) {
+    g_sidebar_btns[0].text = trw(L"Add YTD", L"Adicionar YTD", L"Añadir YTD", L"Добавить YTD");
+    g_sidebar_btns[1].text = trw(L"Add Folder", L"Adicionar pasta", L"Añadir carpeta", L"Добавить папку");
+    g_sidebar_btns[2].text = trw(L"Save All", L"Salvar tudo", L"Guardar todo", L"Сохранить все");
+    g_sidebar_btns[3].text = trw(L"Clear All", L"Limpar tudo", L"Limpiar todo", L"Очистить все");
+    g_sidebar_btns[4].text = trw(L"Find Duplicates", L"Buscar duplicadas", L"Buscar duplicados", L"Найти дубликаты");
+    g_sidebar_btns[5].text = trw(L"Smart Optimize", L"Otimização inteligente", L"Optimización inteligente", L"Умная оптимизация");
+    g_sidebar_btns[6].text = trw(L"Fast Recompress", L"Recompressão rápida", L"Recompresión rápida", L"Быстрое сжатие");
+    g_sidebar_btns[7].text = g_app.use_gpu_encoding
+        ? trw(L"Encoder: GPU", L"Encoder: GPU", L"Codificador: GPU", L"Кодировщик: GPU")
+        : trw(L"Encoder: CPU", L"Encoder: CPU", L"Codificador: CPU", L"Кодировщик: CPU");
+    g_sidebar_btns[8].text = trw(L"Language: English", L"Idioma: Português", L"Idioma: Español", L"Язык: Русский");
+}
 
 /* ── Init ──────────────────────────────────────────────────────────── */
 
 void gui_init(HINSTANCE hInst) {
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icex);
     theme_init();
+    update_sidebar_labels();
 
     WNDCLASSEXW wc = {sizeof(wc)};
     wc.style = CS_HREDRAW | CS_VREDRAW;
@@ -272,14 +314,14 @@ static void open_file_dialog(HWND parent) {
 }
 static void scan_folder_recursive(const wchar_t *dir) {
     wchar_t pattern[MAX_PATH];
-    _snwprintf(pattern, MAX_PATH, L"%s\*", dir);
+    _snwprintf(pattern, MAX_PATH, L"%s\\*", dir);
     WIN32_FIND_DATAW fd;
     HANDLE hFind = FindFirstFileW(pattern, &fd);
     if (hFind == INVALID_HANDLE_VALUE) return;
     do {
         if (fd.cFileName[0] == L'.') continue;
         wchar_t full[MAX_PATH];
-        _snwprintf(full, MAX_PATH, L"%s\%s", dir, fd.cFileName);
+        _snwprintf(full, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             scan_folder_recursive(full);
         } else {
@@ -301,7 +343,10 @@ static void open_folder_dialog(HWND parent) {
     DWORD opts = 0;
     pfd->lpVtbl->GetOptions(pfd, &opts);
     pfd->lpVtbl->SetOptions(pfd, opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-    pfd->lpVtbl->SetTitle(pfd, L"Select folder to scan for YTD/WTD files");
+    pfd->lpVtbl->SetTitle(pfd, trw(L"Select folder to scan for texture files",
+        L"Selecione a pasta para buscar arquivos de textura",
+        L"Seleccione la carpeta para buscar archivos de textura",
+        L"Выберите папку для поиска файлов текстур"));
 
     hr = pfd->lpVtbl->Show(pfd, parent);
     if (SUCCEEDED(hr)) {
@@ -359,18 +404,191 @@ void gui_add_ytd(const wchar_t *path) {
 
 /* ── Save all ──────────────────────────────────────────────────────── */
 
-static void save_all(void) {
-    int saved = 0;
-    for (int i = 0; i < g_app.ytd_count; i++) {
-        bool res = false;
-        if (g_app.ytds[i]->type == ARCHIVE_WTD) {
-            res = wtd_save(g_app.ytds[i], g_app.ytds[i]->file_path);
-        } else {
-            res = ytd_save(g_app.ytds[i], g_app.ytds[i]->file_path);
+static bool select_folder(HWND parent, const wchar_t *title, wchar_t *out_path, size_t out_count) {
+    IFileOpenDialog *pfd = NULL;
+    HRESULT hr = CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
+                                  &IID_IFileOpenDialog, (void **)&pfd);
+    if (FAILED(hr) || !pfd) return false;
+
+    DWORD opts = 0;
+    pfd->lpVtbl->GetOptions(pfd, &opts);
+    pfd->lpVtbl->SetOptions(pfd, opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    pfd->lpVtbl->SetTitle(pfd, title);
+
+    bool selected = false;
+    hr = pfd->lpVtbl->Show(pfd, parent);
+    if (SUCCEEDED(hr)) {
+        IShellItem *psi = NULL;
+        hr = pfd->lpVtbl->GetResult(pfd, &psi);
+        if (SUCCEEDED(hr) && psi) {
+            wchar_t *folder = NULL;
+            hr = psi->lpVtbl->GetDisplayName(psi, SIGDN_FILESYSPATH, &folder);
+            if (SUCCEEDED(hr) && folder) {
+                wcsncpy(out_path, folder, out_count - 1);
+                out_path[out_count - 1] = 0;
+                CoTaskMemFree(folder);
+                selected = true;
+            }
+            psi->lpVtbl->Release(psi);
         }
-        if (res) saved++;
     }
-    gui_update_status("Saved %d / %d files", saved, g_app.ytd_count);
+    pfd->lpVtbl->Release(pfd);
+    return selected;
+}
+
+static void select_language(void) {
+    g_language = (AppLanguage)((g_language + 1) % 4);
+    update_sidebar_labels();
+    InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
+    InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+}
+
+static bool save_archive_to_path(YtdFile *archive, const wchar_t *path) {
+    if (archive->type == ARCHIVE_WTD) return wtd_save(archive, path);
+    return ytd_save(archive, path);
+}
+
+static int save_archives_to_folder(const wchar_t *folder, int *out_skipped) {
+    int saved = 0;
+    int skipped = 0;
+    for (int i = 0; i < g_app.ytd_count; i++) {
+        YtdFile *archive = g_app.ytds[i];
+        const wchar_t *filename = PathFindFileNameW(archive->file_path);
+        wchar_t output[MAX_PATH];
+        _snwprintf(output, MAX_PATH, L"%s\\%s", folder, filename);
+        output[MAX_PATH - 1] = 0;
+        if (archive->type == ARCHIVE_MODEL_READONLY)
+            PathRenameExtensionW(output, L".ytd");
+        if (PathFileExistsW(output)) {
+            wchar_t base[MAX_PATH];
+            wchar_t extension[32];
+            wcsncpy(base, output, MAX_PATH - 1);
+            base[MAX_PATH - 1] = 0;
+            wcsncpy(extension, PathFindExtensionW(output), 31);
+            extension[31] = 0;
+            PathRemoveExtensionW(base);
+            for (int suffix = 2; suffix < 10000; suffix++) {
+                _snwprintf(output, MAX_PATH, L"%s-%d%s", base, suffix, extension);
+                output[MAX_PATH - 1] = 0;
+                if (!PathFileExistsW(output)) break;
+            }
+        }
+        if (save_archive_to_path(archive, output)) saved++;
+        else skipped++;
+    }
+    if (out_skipped) *out_skipped = skipped;
+    return saved;
+}
+
+static bool create_project_snapshot(wchar_t *out_folder, size_t out_count, int *out_saved, int *out_skipped) {
+    wchar_t exe_path[MAX_PATH];
+    if (!GetModuleFileNameW(NULL, exe_path, MAX_PATH)) return false;
+    PathRemoveFileSpecW(exe_path);
+
+    wchar_t projects[MAX_PATH];
+    _snwprintf(projects, MAX_PATH, L"%s\\projects", exe_path);
+    projects[MAX_PATH - 1] = 0;
+    CreateDirectoryW(projects, NULL);
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    _snwprintf(out_folder, out_count, L"%s\\project-%04d%02d%02d-%02d%02d%02d-%03d",
+               projects, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    out_folder[out_count - 1] = 0;
+    if (!CreateDirectoryW(out_folder, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return false;
+
+    *out_saved = save_archives_to_folder(out_folder, out_skipped);
+    return true;
+}
+
+static void save_project_cache(void) {
+    if (g_app.ytd_count == 0) {
+        gui_update_status("No files loaded");
+        return;
+    }
+    wchar_t folder[MAX_PATH];
+    int saved = 0, skipped = 0;
+    if (!create_project_snapshot(folder, MAX_PATH, &saved, &skipped)) {
+        gui_update_status("Failed to create project cache");
+        return;
+    }
+    gui_update_status("Project cache saved: %d files (%d skipped)", saved, skipped);
+    MessageBoxW(g_app.hwnd_main, folder,
+        trw(L"Project cache saved", L"Cache do projeto salvo",
+            L"Caché del proyecto guardada", L"Кэш проекта сохранен"),
+        MB_OK | MB_ICONINFORMATION);
+}
+
+static void save_all(void) {
+    if (g_app.ytd_count == 0) {
+        gui_update_status("No files loaded");
+        return;
+    }
+
+    const TASKDIALOG_BUTTON buttons[] = {
+        {ID_SAVE_REPLACE_ORIGINALS, trw(L"Replace original YTD/WTD files",
+            L"Substituir arquivos YTD/WTD originais", L"Reemplazar archivos YTD/WTD originales",
+            L"Заменить исходные файлы YTD/WTD")},
+        {ID_SAVE_TO_FOLDER, trw(L"Save copies to another folder",
+            L"Salvar cópias em outra pasta", L"Guardar copias en otra carpeta",
+            L"Сохранить копии в другую папку")},
+        {ID_SAVE_PROJECT_CACHE, trw(L"Save only to versioned project cache",
+            L"Salvar somente no cache versionado do projeto", L"Guardar solo en la caché versionada del proyecto",
+            L"Сохранить только в версионный кэш проекта")},
+    };
+    TASKDIALOGCONFIG dialog = {sizeof(dialog)};
+    dialog.hwndParent = g_app.hwnd_main;
+    dialog.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    dialog.pszWindowTitle = trw(L"Save All", L"Salvar tudo", L"Guardar todo", L"Сохранить все");
+    dialog.pszMainInstruction = trw(L"Choose how to save the modified files",
+        L"Escolha como salvar os arquivos modificados", L"Elija cómo guardar los archivos modificados",
+        L"Выберите способ сохранения измененных файлов");
+    dialog.pszContent = trw(L"Project cache snapshots are stored next to the executable.",
+        L"Snapshots do cache ficam ao lado do executável.", L"Las instantáneas de caché se guardan junto al ejecutable.",
+        L"Снимки кэша проекта хранятся рядом с исполняемым файлом.");
+    dialog.cButtons = ARRAYSIZE(buttons);
+    dialog.pButtons = buttons;
+    dialog.nDefaultButton = ID_SAVE_PROJECT_CACHE;
+
+    int choice = IDCANCEL;
+    if (FAILED(TaskDialogIndirect(&dialog, &choice, NULL, NULL)) || choice == IDCANCEL)
+        return;
+    if (choice == ID_SAVE_PROJECT_CACHE) {
+        save_project_cache();
+        return;
+    }
+
+    wchar_t cache_folder[MAX_PATH];
+    int cache_saved = 0, cache_skipped = 0;
+    if (!create_project_snapshot(cache_folder, MAX_PATH, &cache_saved, &cache_skipped)) {
+        gui_update_status("Failed to create project cache; save cancelled");
+        return;
+    }
+
+    int saved = 0, skipped = 0;
+    if (choice == ID_SAVE_TO_FOLDER) {
+        wchar_t folder[MAX_PATH];
+        if (!select_folder(g_app.hwnd_main,
+            trw(L"Select output folder", L"Selecione a pasta de saída",
+                L"Seleccione la carpeta de salida", L"Выберите папку вывода"),
+            folder, MAX_PATH)) {
+            gui_update_status("Save cancelled; project cache kept");
+            return;
+        }
+        saved = save_archives_to_folder(folder, &skipped);
+    } else {
+        for (int i = 0; i < g_app.ytd_count; i++) {
+            YtdFile *archive = g_app.ytds[i];
+            if (archive->type == ARCHIVE_MODEL_READONLY) {
+                skipped++;
+                continue;
+            }
+            if (save_archive_to_path(archive, archive->file_path)) saved++;
+            else skipped++;
+        }
+    }
+    gui_update_status("Saved %d files (%d skipped); cache: %d files", saved, skipped, cache_saved);
 }
 
 /* ── Find duplicates ───────────────────────────────────────────────── */
@@ -382,10 +600,12 @@ static void do_find_duplicates(void) {
     }
 
     int choice = MessageBoxW(g_app.hwnd_main,
-        L"How do you want to find duplicates?\n\n"
-        L"YES = By Name (fast, matches texture names)\n"
-        L"NO = By Hash (thorough, compares actual data)",
-        L"Find Duplicates", MB_YESNOCANCEL | MB_ICONQUESTION);
+        trw(L"How do you want to find duplicates?\n\nYES = By Name\nNO = By Hash",
+            L"Como deseja buscar duplicadas?\n\nSIM = Por nome\nNÃO = Por hash",
+            L"¿Cómo desea buscar duplicados?\n\nSÍ = Por nombre\nNO = Por hash",
+            L"Как искать дубликаты?\n\nДА = По имени\nНЕТ = По хэшу"),
+        trw(L"Find Duplicates", L"Buscar duplicadas", L"Buscar duplicados", L"Найти дубликаты"),
+        MB_YESNOCANCEL | MB_ICONQUESTION);
     if (choice == IDCANCEL) return;
 
     bool by_hash = (choice == IDNO);
@@ -395,7 +615,11 @@ static void do_find_duplicates(void) {
 
     if (group_count == 0) {
         gui_update_status("No duplicates found");
-        MessageBoxW(g_app.hwnd_main, L"No duplicate textures were found.", L"Find Duplicates", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(g_app.hwnd_main,
+            trw(L"No duplicate textures were found.", L"Nenhuma textura duplicada foi encontrada.",
+                L"No se encontraron texturas duplicadas.", L"Дубликаты текстур не найдены."),
+            trw(L"Find Duplicates", L"Buscar duplicadas", L"Buscar duplicados", L"Найти дубликаты"),
+            MB_OK | MB_ICONINFORMATION);
     } else {
         int total_dups = 0;
         size_t wasted = 0;
@@ -484,7 +708,7 @@ static INT_PTR CALLBACK SmartOptDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             GetDlgItemTextW(hDlg, IDC_OPT_MAXH, buf, 16);
             params->max_h = _wtoi(buf);
             int sel = (int)SendDlgItemMessageW(hDlg, IDC_OPT_FMT, CB_GETCURSEL, 0, 0);
-            TexFormat fmts[] = {TEX_FMT_A8R8G8B8, TEX_FMT_BC1, TEX_FMT_BC3, TEX_FMT_BC7};
+            TexFormat fmts[] = {TEX_FMT_UNKNOWN, TEX_FMT_BC1, TEX_FMT_BC3, TEX_FMT_BC7};
             params->fmt = fmts[sel];
             if (params->max_w < 4) params->max_w = 4;
             if (params->max_h < 4) params->max_h = 4;
@@ -590,7 +814,7 @@ static INT_PTR CALLBACK CustomResizeDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPAR
         for (int i = 0; i < 10; i++) SendMessageW(hF, CB_ADDSTRING, 0, (LPARAM)fmts[i]);
         
         int sel = 0;
-        TexFormat fmt_vals[] = {TEX_FMT_A8R8G8B8, TEX_FMT_BC1, TEX_FMT_BC2, TEX_FMT_BC3, TEX_FMT_BC4, TEX_FMT_BC5, TEX_FMT_BC7, TEX_FMT_A8R8G8B8, TEX_FMT_B5G5R5A1, TEX_FMT_A8};
+        TexFormat fmt_vals[] = {TEX_FMT_UNKNOWN, TEX_FMT_BC1, TEX_FMT_BC2, TEX_FMT_BC3, TEX_FMT_BC4, TEX_FMT_BC5, TEX_FMT_BC7, TEX_FMT_A8R8G8B8, TEX_FMT_B5G5R5A1, TEX_FMT_A8};
         for(int i = 0; i < 10; i++) if (params->fmt == fmt_vals[i]) { sel = i; break; }
         SendMessageW(hF, CB_SETCURSEL, sel, 0);
 
@@ -625,7 +849,7 @@ static INT_PTR CALLBACK CustomResizeDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPAR
             GetDlgItemTextW(hDlg, IDC_RES_MAXH, buf, 16); params->max_h = _wtoi(buf);
             
             int sel = (int)SendDlgItemMessageW(hDlg, IDC_RES_FMT, CB_GETCURSEL, 0, 0);
-            TexFormat fmt_vals[] = {TEX_FMT_A8R8G8B8, TEX_FMT_BC1, TEX_FMT_BC2, TEX_FMT_BC3, TEX_FMT_BC4, TEX_FMT_BC5, TEX_FMT_BC7, TEX_FMT_A8R8G8B8, TEX_FMT_B5G5R5A1, TEX_FMT_A8};
+            TexFormat fmt_vals[] = {TEX_FMT_UNKNOWN, TEX_FMT_BC1, TEX_FMT_BC2, TEX_FMT_BC3, TEX_FMT_BC4, TEX_FMT_BC5, TEX_FMT_BC7, TEX_FMT_A8R8G8B8, TEX_FMT_B5G5R5A1, TEX_FMT_A8};
             if (sel > 0) params->fmt = fmt_vals[sel];
             
             int mip_sel = (int)SendDlgItemMessageW(hDlg, IDC_RES_MIPMODE, CB_GETCURSEL, 0, 0);
@@ -707,7 +931,7 @@ static void do_smart_optimize(void) {
         return;
     }
 
-    SmartOptParams params = {512, 512, TEX_FMT_A8R8G8B8, -2};
+    SmartOptParams params = {512, 512, TEX_FMT_UNKNOWN, -2};
     LPDLGTEMPLATE tpl = build_smart_opt_template(L"Smart Optimize");
 
     INT_PTR result = DialogBoxIndirectParamW(
@@ -865,7 +1089,8 @@ static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int
     AppendMenuW(hResize, MF_STRING, IDM_CTX_RESIZE_HALF, half_str);
     AppendMenuW(hResize, MF_STRING, IDM_CTX_RESIZE_QRTR, qrtr_str);
     AppendMenuW(hResize, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hResize, MF_STRING, IDM_CTX_RESIZE_CUSTOM, L"Custom...");
+    AppendMenuW(hResize, MF_STRING, IDM_CTX_RESIZE_CUSTOM,
+        trw(L"Custom...", L"Personalizado...", L"Personalizado...", L"Другой..."));
 
     AppendMenuW(hFmt, MF_STRING, IDM_CTX_FMT_KEEP, L"Keep Original");
     AppendMenuW(hFmt, MF_STRING, IDM_CTX_FMT_BC1,  L"DXT1 (BC1)");
@@ -873,12 +1098,16 @@ static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int
     AppendMenuW(hFmt, MF_STRING, IDM_CTX_FMT_BC5,  L"ATI2 (BC5)");
     AppendMenuW(hFmt, MF_STRING, IDM_CTX_FMT_BC7,  L"BC7");
 
-    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hResize, L"Resize");
-    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFmt,    L"Convert Format");
+    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hResize,
+        trw(L"Resize", L"Redimensionar", L"Redimensionar", L"Изменить размер"));
+    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFmt,
+        trw(L"Convert Format", L"Converter formato", L"Convertir formato", L"Преобразовать формат"));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, IDM_CTX_EXPORT_DDS, L"Export as DDS...");
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_EXPORT_DDS,
+        trw(L"Export as DDS...", L"Exportar como DDS...", L"Exportar como DDS...", L"Экспортировать DDS..."));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, IDM_CTX_REMOVE, L"Remove Texture");
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_REMOVE,
+        trw(L"Remove Texture", L"Remover textura", L"Eliminar textura", L"Удалить текстуру"));
 
     /* Store selection for WM_COMMAND */
     g_app.sel_ytd_idx = ytd_idx;
@@ -928,7 +1157,12 @@ static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int
 static void do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, TexFormat fmt, int max_mips) {
     YtdFile *ytd = g_app.ytds[ytd_idx];
     TextureEntry *te = &ytd->textures[tex_idx];
+    TexFormat enc_fmt = (fmt == TEX_FMT_UNKNOWN) ? te->format : fmt;
     LOG("do_texture_resize: '%s' %dx%d -> %dx%d fmt=%d", te->name, te->width, te->height, new_w, new_h, fmt);
+    if (!tex_format_can_encode(enc_fmt)) {
+        gui_update_status("Cannot encode '%s' as %s", te->name, tex_format_name(enc_fmt));
+        return;
+    }
 
     if (new_w < 4) new_w = 4;
     if (new_h < 4) new_h = 4;
@@ -962,7 +1196,6 @@ static void do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, Te
     }
 
     /* Re-encode with mips */
-    TexFormat enc_fmt = (fmt != TEX_FMT_A8R8G8B8 && fmt != te->format) ? fmt : te->format;
     int mip_count = 0;
     size_t total_size = 0;
     uint8_t *new_data = tex_generate_mips(resized, new_w, new_h, enc_fmt,
@@ -1027,14 +1260,19 @@ static void do_texture_remove(int ytd_idx, int tex_idx) {
     LOG("do_texture_remove: '%s' from '%s'", tex->name, ytd->name);
 
     int result = MessageBoxW(g_app.hwnd_main,
-        L"Are you sure you want to remove this texture?",
-        L"Remove Texture", MB_YESNO | MB_ICONQUESTION);
+        trw(L"Are you sure you want to remove this texture?",
+            L"Tem certeza de que deseja remover esta textura?",
+            L"¿Seguro que desea eliminar esta textura?", L"Удалить эту текстуру?"),
+        trw(L"Remove Texture", L"Remover textura", L"Eliminar textura", L"Удалить текстуру"),
+        MB_YESNO | MB_ICONQUESTION);
     if (result != IDYES) return;
 
     char removed_name[EO_MAX_NAME];
     strncpy(removed_name, tex->name, EO_MAX_NAME);
+    removed_name[EO_MAX_NAME - 1] = 0;
 
     free(tex->data);
+    free(tex->wtd_meta);
     /* Shift remaining textures down */
     for (int i = tex_idx; i < ytd->texture_count - 1; i++) {
         ytd->textures[i] = ytd->textures[i + 1];
@@ -1064,7 +1302,10 @@ static void paint_content(HWND hwnd, HDC hdc) {
         SelectObject(hdc, theme_font_title());
         RECT text_rc = rc;
         text_rc.top = rc.bottom / 2 - 20;
-        DrawTextW(hdc, L"Drop YTD files here or click 'Add YTD'", -1, &text_rc,
+        DrawTextW(hdc, trw(L"Drop texture files here or click 'Add YTD'",
+            L"Arraste arquivos de textura aqui ou clique em 'Adicionar YTD'",
+            L"Arrastre archivos de textura aquí o haga clic en 'Añadir YTD'",
+            L"Перетащите файлы текстур сюда или нажмите 'Добавить YTD'"), -1, &text_rc,
                   DT_CENTER | DT_SINGLELINE);
         return;
     }
@@ -1200,8 +1441,7 @@ static void paint_header(HWND hwnd, HDC hdc) {
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, CLR_TEXT_PRIMARY);
-    SelectObject(hdc, CreateFontW(-18, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
-        0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"));
+    SelectObject(hdc, theme_font_title());
     RECT title_rc = {16, 0, 190, HEADER_HEIGHT};
     DrawTextW(hdc, L"EasyOptimizer-V", -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
@@ -1221,7 +1461,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         for (int i = 0; i < count; i++) {
             wchar_t path[MAX_PATH];
             DragQueryFileW(hDrop, i, path, MAX_PATH);
-            if (PathMatchSpecW(path, L"*.ytd"))
+            if (PathMatchSpecW(path, L"*.ytd;*.wtd;*.ydr;*.yft;*.ydd"))
                 gui_add_ytd(path);
         }
         DragFinish(hDrop);
@@ -1248,6 +1488,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         for (int i = 0; i < g_app.ytd_count; i++)
             ytd_free(g_app.ytds[i]);
         theme_cleanup();
+        CoUninitialize();
         PostQuitMessage(0);
         return 0;
     }
@@ -1402,9 +1643,10 @@ static LRESULT CALLBACK SidebarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                     case ID_SIDEBAR_ADDFOLDER:  open_folder_dialog(g_app.hwnd_main); break;
                     case ID_SIDEBAR_TOGGLE_ENC: 
                         g_app.use_gpu_encoding = !g_app.use_gpu_encoding;
-                        g_sidebar_btns[6].text = g_app.use_gpu_encoding ? L"Encoder: GPU" : L"Encoder: CPU";
+                        update_sidebar_labels();
                         InvalidateRect(hwnd, NULL, TRUE);
                         break;
+                    case ID_SIDEBAR_LANGUAGE: select_language(); break;
                 }
                 return 0;
             }

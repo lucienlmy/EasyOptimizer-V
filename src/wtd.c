@@ -27,54 +27,36 @@ static float read_float(const uint8_t *data, int *pos) {
     return val;
 }
 
-static bool is_block_compressed(uint32_t format) {
-    // D3DFMT_DXT1 = 0x31545844, D3DFMT_DXT3 = 0x33545844, D3DFMT_DXT5 = 0x35545844
-    // ATI1 = 0x31495441, ATI2 = 0x32495441
-    return format == 0x31545844 || format == 0x33545844 || format == 0x35545844 ||
-           format == 0x31495441 || format == 0x32495441;
-}
-
-static int get_bytes_per_pixel(uint32_t format) {
-    switch(format) {
-        case 21: // A8R8G8B8
-        case 22: // X8R8G8B8
-        case 32: // A8B8G8R8
-            return 4;
-        case 25: // A1R5G5B5
-            return 2;
-        case 28: // A8
-        case 50: // L8
-            return 1;
-        default: return 4;
+static TexFormat format_from_d3d(uint32_t format) {
+    switch (format) {
+        case 0x31545844: return TEX_FMT_BC1;
+        case 0x33545844: return TEX_FMT_BC2;
+        case 0x35545844: return TEX_FMT_BC3;
+        case 0x31495441: return TEX_FMT_BC4;
+        case 0x32495441: return TEX_FMT_BC5;
+        case 21: return TEX_FMT_A8R8G8B8;
+        case 25: return TEX_FMT_B5G5R5A1;
+        case 23: return TEX_FMT_B5G6R5;
+        case 28: return TEX_FMT_A8;
+        case 50: return TEX_FMT_R8;
+        default: return TEX_FMT_UNKNOWN;
     }
 }
 
-static int calc_texture_data_size(uint32_t format, int width, int height, int stride, int levels) {
-    int total = 0;
-    int w = width;
-    int h = height;
-
-    if (levels < 1) levels = 1;
-
-    for (int mip = 0; mip < levels; mip++) {
-        int mipW = w > 1 ? w : 1;
-        int mipH = h > 1 ? h : 1;
-
-        if (is_block_compressed(format)) {
-            int bw = (mipW + 3) / 4;
-            if (bw < 1) bw = 1;
-            int bh = (mipH + 3) / 4;
-            if (bh < 1) bh = 1;
-            int blockSize = (format == 0x31545844 || format == 0x31495441) ? 8 : 16;
-            total += bw * bh * blockSize;
-        } else {
-            int bpp = get_bytes_per_pixel(format);
-            total += mipW * mipH * bpp;
-        }
-        w /= 2;
-        h /= 2;
+static uint32_t format_to_d3d(TexFormat format) {
+    switch (format) {
+        case TEX_FMT_BC1: return 0x31545844;
+        case TEX_FMT_BC2: return 0x33545844;
+        case TEX_FMT_BC3: return 0x35545844;
+        case TEX_FMT_BC4: return 0x31495441;
+        case TEX_FMT_BC5: return 0x32495441;
+        case TEX_FMT_A8R8G8B8: return 21;
+        case TEX_FMT_B5G5R5A1: return 25;
+        case TEX_FMT_B5G6R5: return 23;
+        case TEX_FMT_A8: return 28;
+        case TEX_FMT_R8: return 50;
+        default: return 0;
     }
-    return total;
 }
 
 YtdFile *wtd_load(const wchar_t *path) {
@@ -108,7 +90,15 @@ YtdFile *wtd_load(const wchar_t *path) {
     uint32_t physicalSize = ((flags >> 15) & 0x7FFu) << (((flags >> 26) & 0xF) + 8);
 
     uint32_t expected_decompressed = virtualSize + physicalSize;
+    if (virtualSize < 32 || expected_decompressed < virtualSize) {
+        free(fileData);
+        return NULL;
+    }
     uint8_t *decompressed = malloc(expected_decompressed);
+    if (!decompressed) {
+        free(fileData);
+        return NULL;
+    }
 
     mz_ulong dest_len = expected_decompressed;
     int mz_res = mz_uncompress(decompressed, &dest_len, fileData + 12, file_size - 12);
@@ -140,6 +130,11 @@ YtdFile *wtd_load(const wchar_t *path) {
     uint32_t *hashes = calloc(hashCount, sizeof(uint32_t));
     if (hashTablePtr != 0) {
         int hashOffset = hashTablePtr - VIRTUAL_BASE;
+        if (hashOffset < 0 || hashOffset + hashCount * 4 > (int)virtualSize) {
+            free(hashes);
+            free(decompressed);
+            return NULL;
+        }
         for (int i = 0; i < hashCount; i++) {
             hashes[i] = *(uint32_t*)(virtualData + hashOffset + i * 4);
         }
@@ -149,6 +144,12 @@ YtdFile *wtd_load(const wchar_t *path) {
     if (!texPtrs) { free(hashes); free(decompressed); return NULL; }
     if (texturesPtr != 0) {
         int ptrOffset = texturesPtr - VIRTUAL_BASE;
+        if (ptrOffset < 0 || ptrOffset + texCount * 4 > (int)virtualSize) {
+            free(texPtrs);
+            free(hashes);
+            free(decompressed);
+            return NULL;
+        }
         for (int i = 0; i < texCount; i++) {
             texPtrs[i] = *(uint32_t*)(virtualData + ptrOffset + i * 4);
         }
@@ -182,6 +183,10 @@ YtdFile *wtd_load(const wchar_t *path) {
 
         TextureEntry *tex = &wtd->textures[wtd->texture_count++];
         tex->wtd_meta = calloc(1, sizeof(WtdTextureMetadata));
+        if (!tex->wtd_meta) {
+            wtd->texture_count--;
+            continue;
+        }
         WtdTextureMetadata *texm = tex->wtd_meta;
         texm->original_hash = (i < hashCount) ? hashes[i] : 0;
 
@@ -197,7 +202,7 @@ YtdFile *wtd_load(const wchar_t *path) {
 
         tex->width = read_u16(virtualData, &pos);
         tex->height = read_u16(virtualData, &pos);
-        tex->format = read_u32(virtualData, &pos);
+        tex->format = format_from_d3d(read_u32(virtualData, &pos));
         tex->stride = read_u16(virtualData, &pos);
         texm->texture_type = virtualData[pos++];
         tex->mip_count = virtualData[pos++];
@@ -228,16 +233,17 @@ YtdFile *wtd_load(const wchar_t *path) {
             }
         }
 
-        if (dataPtr != 0) {
+        if (tex->format != TEX_FMT_UNKNOWN && dataPtr != 0) {
             int dataOffset = dataPtr - PHYSICAL_BASE;
             if (dataOffset >= 0 && dataOffset < (int)physicalSize) {
-                int dataSize = calc_texture_data_size(tex->format, tex->width, tex->height, tex->stride, tex->mip_count);
+                int dataSize = (int)tex_total_mip_size(tex->width, tex->height, tex->format, tex->mip_count);
                 int available = physicalSize - dataOffset;
                 if (dataSize > available) dataSize = available;
                 
                 tex->data_size = dataSize;
                 tex->data = malloc(dataSize);
-                memcpy(tex->data, physicalData + dataOffset, dataSize);
+                if (tex->data)
+                    memcpy(tex->data, physicalData + dataOffset, dataSize);
             }
         }
     }
@@ -320,6 +326,12 @@ static int hash_compare(const void *a, const void *b) {
 bool wtd_save(const YtdFile *wtd, const wchar_t *path) {
     if (!wtd || wtd->texture_count == 0) return false;
     WtdFileMeta *wtdm = wtd->wtd_meta;
+    if (!wtdm) return false;
+    for (int i = 0; i < wtd->texture_count; i++) {
+        if (!wtd->textures[i].data || wtd->textures[i].data_size == 0 ||
+            !wtd->textures[i].wtd_meta || format_to_d3d(wtd->textures[i].format) == 0)
+            return false;
+    }
 
     int texCount = wtd->texture_count;
     int dictHeaderSize = 32;
@@ -408,15 +420,15 @@ bool wtd_save(const YtdFile *wtd, const wchar_t *path) {
         write_u32(virtualData, pos + 24, texm->unknown6);
         write_u16(virtualData, pos + 28, tex->width);
         write_u16(virtualData, pos + 30, tex->height);
-        write_u32(virtualData, pos + 32, tex->format);
+        write_u32(virtualData, pos + 32, format_to_d3d(tex->format));
         
         uint16_t stride = tex->stride;
-        if (is_block_compressed(tex->format)) {
+        if (tex_format_is_compressed(tex->format)) {
             int bw = (tex->width + 3) / 4;
             if (bw < 1) bw = 1;
             int bh = (tex->height + 3) / 4;
             if (bh < 1) bh = 1;
-            int bs = (tex->format == 0x31545844 || tex->format == 0x31495441) ? 8 : 16;
+            int bs = tex_format_block_bytes(tex->format);
             int mip0 = bw * bh * bs;
             stride = (uint16_t)(mip0 / (tex->height > 0 ? tex->height : 1));
         }

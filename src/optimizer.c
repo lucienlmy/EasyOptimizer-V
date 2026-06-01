@@ -142,7 +142,11 @@ int optimizer_smart_resize(YtdFile *ytd, int max_width, int max_height, TexForma
         if (!resized_rgba) continue;
 
         /* Re-encode with mips */
-        TexFormat enc_fmt = target_fmt != TEX_FMT_A8R8G8B8 ? target_fmt : te->format;
+        TexFormat enc_fmt = target_fmt == TEX_FMT_UNKNOWN ? te->format : target_fmt;
+        if (!tex_format_can_encode(enc_fmt)) {
+            bc7enc_free(resized_rgba);
+            continue;
+        }
         int mip_count = 0;
         size_t total_size = 0;
         uint8_t *new_data = tex_generate_mips(resized_rgba, new_w, new_h, enc_fmt,
