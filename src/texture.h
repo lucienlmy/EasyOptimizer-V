@@ -7,6 +7,10 @@
 uint8_t *tex_decode_to_bgra(const TextureEntry *tex, int mip_level, int *out_w, int *out_h);
 bool tex_format_can_encode(TexFormat fmt);
 
+/* Returns true if the decoded mip-0 BGRA has any pixel with alpha < threshold (250).
+ * Used to decide whether BC3/BC7 can be safely downgraded to BC1 without losing info. */
+bool tex_alpha_in_use(const TextureEntry *tex);
+
 /* Encode RGBA pixels to compressed format. Returns allocated data, sets out_size. */
 uint8_t *tex_encode_bc(const uint8_t *rgba, int w, int h, TexFormat fmt, size_t *out_size);
 

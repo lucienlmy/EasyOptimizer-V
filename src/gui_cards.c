@@ -10,7 +10,9 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd, bool hovered)
     RECT rc = {x, y, x + w, y + 56};
 
     HBRUSH fill = CreateSolidBrush(hovered ? CLR_HOVER : CLR_SURFACE_DARK);
-    HPEN pen = CreatePen(PS_SOLID, 1, ytd->expanded ? CLR_PRIMARY : CLR_BORDER_DARK);
+    COLORREF border_clr = ytd->is_preview ? RGB(230, 160, 30)
+                                          : (ytd->expanded ? CLR_PRIMARY : CLR_BORDER_DARK);
+    HPEN pen = CreatePen(PS_SOLID, ytd->is_preview ? 2 : 1, border_clr);
     HPEN oldPen = (HPEN)SelectObject(hdc, pen);
     HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fill);
     RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 12, 12);
@@ -45,7 +47,10 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd, bool hovered)
     double total_mib = total_size / (1024.0 * 1024.0);
 
     wchar_t info[128];
-    _snwprintf(info, 128, L"%d textures | %.2f MiB", ytd->texture_count, total_mib);
+    if (ytd->is_preview)
+        _snwprintf(info, 128, L"PREVIEW | %d textures | %.2f MiB", ytd->texture_count, total_mib);
+    else
+        _snwprintf(info, 128, L"%d textures | %.2f MiB", ytd->texture_count, total_mib);
 
     SetTextColor(hdc, theme_size_color(total_mib));
     SelectObject(hdc, theme_font_small());

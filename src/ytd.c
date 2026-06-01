@@ -268,7 +268,8 @@ static uint8_t *read_file_bytes(const wchar_t *path, size_t *out_size) {
     fseek(f, 0, SEEK_SET);
     if (sz <= 0) { fclose(f); return NULL; }
     uint8_t *buf = (uint8_t *)malloc(sz);
-    fread(buf, 1, sz, f);
+    if (!buf) { fclose(f); LOG_ERR("read_file_bytes: malloc(%ld) failed", sz); return NULL; }
+    if (fread(buf, 1, sz, f) != (size_t)sz) { free(buf); fclose(f); return NULL; }
     fclose(f);
     *out_size = (size_t)sz;
     LOG("read_file_bytes: read %ld bytes", sz);
@@ -325,8 +326,10 @@ YtdFile *ytd_load(const wchar_t *filepath) {
     if (items_off + count * 8 > vdata_len) { LOG_ERR("ytd_load: items_off out of bounds (%zu + %u*8 > %zu)", items_off, count, vdata_len); free(payload); return NULL; }
 
     YtdFile *ytd = (YtdFile *)calloc(1, sizeof(YtdFile));
+    if (!ytd) { free(payload); return NULL; }
     ytd->type = ARCHIVE_YTD;
     ytd->textures = (TextureEntry *)calloc(count, sizeof(TextureEntry));
+    if (!ytd->textures) { free(ytd); free(payload); return NULL; }
     ytd->texture_count = 0;
 
     const wchar_t *wfname = wcsrchr(filepath, L'\\');

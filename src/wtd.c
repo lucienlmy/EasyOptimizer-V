@@ -73,7 +73,8 @@ YtdFile *wtd_load(const wchar_t *path) {
     }
 
     uint8_t *fileData = malloc(file_size);
-    fread(fileData, 1, file_size, f);
+    if (!fileData) { fclose(f); LOG("[ERR] wtd_load: malloc(%ld) failed", file_size); return NULL; }
+    if (fread(fileData, 1, file_size, f) != (size_t)file_size) { free(fileData); fclose(f); return NULL; }
     fclose(f);
 
     uint32_t magic = *(uint32_t*)fileData;
@@ -127,7 +128,8 @@ YtdFile *wtd_load(const wchar_t *path) {
     uint16_t texCount = read_u16(virtualData, &pos);
     uint16_t texCap = read_u16(virtualData, &pos);
 
-    uint32_t *hashes = calloc(hashCount, sizeof(uint32_t));
+    uint32_t *hashes = calloc(hashCount ? hashCount : 1, sizeof(uint32_t));
+    if (!hashes) { free(decompressed); return NULL; }
     if (hashTablePtr != 0) {
         int hashOffset = hashTablePtr - VIRTUAL_BASE;
         if (hashOffset < 0 || hashOffset + hashCount * 4 > (int)virtualSize) {
@@ -174,7 +176,12 @@ YtdFile *wtd_load(const wchar_t *path) {
     wtdm->original_parent_dict = originalParentDict;
     wtdm->original_usage_count = originalUsageCount;
     wtd->texture_count = 0;
-    wtd->textures = calloc(texCount, sizeof(TextureEntry));
+    wtd->textures = calloc(texCount ? texCount : 1, sizeof(TextureEntry));
+    if (!wtd->textures || !wtd->wtd_meta) {
+        free(wtd->textures); free(wtd->wtd_meta); free(wtd);
+        free(texPtrs); free(hashes); free(decompressed);
+        return NULL;
+    }
 
     for (int i = 0; i < texCount; i++) {
         if (texPtrs[i] == 0) continue;
@@ -450,8 +457,8 @@ bool wtd_save(const YtdFile *wtd, const wchar_t *path) {
 
     int pos = 0;
     write_u32(virtualData, pos, wtdm->original_vft != 0 ? wtdm->original_vft : 0x00D6F028); pos += 4;
-    write_u32(virtualData, pos, 0); pos += 4;
-    write_u32(virtualData, pos, wtdm->original_parent_dict); pos += 4;
+    write_u32(virtualData, pos, 0); pos += 4;                              /* BlockMapPtr (null) */
+    write_u32(virtualData, pos, 0); pos += 4;                              /* ParentDict (runtime ptr, zeroed like C#) */
     write_u32(virtualData, pos, wtdm->original_usage_count); pos += 4;
     write_u32(virtualData, pos, VIRTUAL_BASE + hashArrayOffset); pos += 4;
     write_u16(virtualData, pos, texCount); pos += 2;

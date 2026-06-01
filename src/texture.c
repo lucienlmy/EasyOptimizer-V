@@ -24,6 +24,7 @@ static uint8_t *decode_block_image(const uint8_t *data, int w, int h,
     int bw = (w + 3) / 4;
     int bh = (h + 3) / 4;
     uint8_t *out = (uint8_t *)calloc(1, (size_t)w * h * 4);
+    if (!out) return NULL;   /* huge/corrupt dimensions: fail gracefully */
     const uint8_t *src = data;
 
     for (int by = 0; by < bh; by++) {
@@ -110,6 +111,7 @@ uint8_t *tex_decode_to_bgra(const TextureEntry *tex, int mip_level, int *out_w, 
     if (!tex_format_is_compressed(tex->format)) {
         size_t pixel_size = (size_t)w * h * 4;
         uint8_t *out = (uint8_t *)calloc(1, pixel_size);
+        if (!out) return NULL;   /* huge/corrupt dimensions: fail gracefully */
         if (tex->format == TEX_FMT_A8R8G8B8) {
             memcpy(out, mip_data, pixel_size);
         } else if (tex->format == TEX_FMT_R8G8B8A8) {
@@ -208,11 +210,12 @@ static uint8_t *tex_encode_bc2(const uint8_t *rgba, int w, int h, size_t *out_si
 
 uint8_t *tex_encode_bc(const uint8_t *rgba, int w, int h, TexFormat fmt, size_t *out_size) {
     if (fmt == TEX_FMT_BC2) return tex_encode_bc2(rgba, w, h, out_size);
-    if (g_app.use_gpu_encoding && (fmt == TEX_FMT_BC1 || fmt == TEX_FMT_BC3 || fmt == TEX_FMT_BC7)) {
+    // NVTT 2 CUDA compressor only supports BC1 and BC3, and requires multiples of 4.
+    // For BC7 and other sizes, we must fallback to the fast CPU ISPC encoder to prevent crashes!
+    if (g_app.use_gpu_encoding && (fmt == TEX_FMT_BC1 || fmt == TEX_FMT_BC3) && (w % 4 == 0) && (h % 4 == 0)) {
         NvttFormat nvttf;
         if (fmt == TEX_FMT_BC1) nvttf = NVTT_FORMAT_BC1;
-        else if (fmt == TEX_FMT_BC3) nvttf = NVTT_FORMAT_BC3;
-        else nvttf = NVTT_FORMAT_BC7;
+        else nvttf = NVTT_FORMAT_BC3;
         
         // bgra is needed, our rgba is actually BGRA internally from the decoder!
         // wait, let's verify if `rgba` is actually BGRA or RGBA.
@@ -335,4 +338,24 @@ uint8_t *tex_generate_mips(const uint8_t *rgba, int w, int h, TexFormat fmt,
     *out_mip_count = mip_count;
     *out_total_size = offset;
     return result;
+}
+
+bool tex_alpha_in_use(const TextureEntry *tex) {
+    /* Formats without an alpha channel: BC1 has 1-bit punch-through but
+     * we still treat it as "no alpha" for downgrade purposes. */
+    if (tex->format == TEX_FMT_BC1 || tex->format == TEX_FMT_BC4 ||
+        tex->format == TEX_FMT_BC5 || tex->format == TEX_FMT_R8 ||
+        tex->format == TEX_FMT_B5G6R5) {
+        return false;
+    }
+    int w = 0, h = 0;
+    uint8_t *bgra = tex_decode_to_bgra(tex, 0, &w, &h);
+    if (!bgra) return true; /* safe default: assume has alpha */
+    bool has_alpha = false;
+    size_t pixels = (size_t)w * h;
+    for (size_t i = 0; i < pixels; i++) {
+        if (bgra[i*4+3] < 250) { has_alpha = true; break; }
+    }
+    free(bgra);
+    return has_alpha;
 }

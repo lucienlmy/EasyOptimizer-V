@@ -139,6 +139,7 @@ int optimizer_smart_resize(YtdFile *ytd, int max_width, int max_height, TexForma
         /* Convert BGRA → RGBA for encoder */
         size_t px_count = (size_t)dec_w * dec_h;
         uint8_t *rgba = (uint8_t *)malloc(px_count * 4);
+        if (!rgba) { free(bgra); continue; }
         for (size_t p = 0; p < px_count; p++) {
             rgba[p*4+0] = bgra[p*4+2];
             rgba[p*4+1] = bgra[p*4+1];
@@ -205,7 +206,8 @@ static YtdFile *make_consolidated_ytd(const wchar_t *base_dir, int seq) {
     if (!out) return NULL;
     out->type = ARCHIVE_YTD;
     out->expanded = true;
-    out->modified = true;
+    out->modified = false;   /* preview: not yet committed */
+    out->is_preview = true;
     _snprintf(out->name, EO_MAX_NAME, "consolidated_textures_%d.ytd", seq);
     out->name[EO_MAX_NAME - 1] = 0;
     wchar_t wname[EO_MAX_NAME];
@@ -251,12 +253,14 @@ static void archive_remove_texture(YtdFile *a, int idx) {
     a->modified = true;
 }
 
-int optimizer_migrate_duplicates(YtdFile **io_ytds, int *io_ytd_count, int max_ytds,
-                                 DupCriterion criterion, MigrateStrategy strategy,
-                                 int *out_dup_groups, int *out_textures_moved,
-                                 int *out_consolidated) {
+int optimizer_build_consolidation(YtdFile **io_ytds, int *io_ytd_count, int max_ytds,
+                                  DupCriterion criterion, MigrateStrategy strategy,
+                                  PendingRemoval **out_removals, int *out_removal_count,
+                                  int *out_dup_groups, int *out_textures, int *out_consolidated) {
+    if (out_removals) *out_removals = NULL;
+    if (out_removal_count) *out_removal_count = 0;
     if (out_dup_groups) *out_dup_groups = 0;
-    if (out_textures_moved) *out_textures_moved = 0;
+    if (out_textures) *out_textures = 0;
     if (out_consolidated) *out_consolidated = 0;
     if (!io_ytds || !io_ytd_count || *io_ytd_count == 0) return 0;
 
@@ -265,10 +269,9 @@ int optimizer_migrate_duplicates(YtdFile **io_ytds, int *io_ytd_count, int max_y
     if (out_dup_groups) *out_dup_groups = group_count;
     if (group_count == 0) { optimizer_free_groups(groups, group_count); return 0; }
 
-    /* Collect (ytd_idx, tex_idx) pairs to remove later, deduped. */
-    typedef struct { int y; int t; } TexRef;
+    /* Removal list (by pointer, robust to later re-sorting). */
     int rem_cap = 64, rem_n = 0;
-    TexRef *rem = (TexRef *)malloc(rem_cap * sizeof(TexRef));
+    PendingRemoval *rem = (PendingRemoval *)malloc(rem_cap * sizeof(PendingRemoval));
 
     /* Base dir for consolidated YTDs: dir of first existing YTD. */
     wchar_t base_dir[EO_MAX_PATH] = {0};
@@ -289,35 +292,26 @@ int optimizer_migrate_duplicates(YtdFile **io_ytds, int *io_ytd_count, int max_y
     int consol_created = 0;
     int moved = 0;
 
-    int orig_count_before = *io_ytd_count;
+    if (!rem) { optimizer_free_groups(groups, group_count); return 0; }
+
+    #define PUSH_REMOVAL(ytd_, tex_) do { \
+        if (rem_n == rem_cap) { \
+            PendingRemoval *grow_ = (PendingRemoval *)realloc(rem, (size_t)rem_cap * 2 * sizeof(PendingRemoval)); \
+            if (!grow_) goto done_groups; \
+            rem = grow_; rem_cap *= 2; \
+        } \
+        rem[rem_n].ytd = (ytd_); rem[rem_n].tex_index = (tex_); rem_n++; moved++; \
+    } while (0)
 
     for (int g = 0; g < group_count; g++) {
         DupGroup *dg = &groups[g];
         if (dg->count < 2) continue;
 
-        /* "master" = first entry */
         DupEntry *master = &dg->entries[0];
         TextureEntry *master_tex = &io_ytds[master->ytd_index]->textures[master->tex_index];
 
-        if (strategy == MIGRATE_KEEP_ORIGINAL) {
-            /* Remove every dup except master from originals. */
-            for (int e = 1; e < dg->count; e++) {
-                if (rem_n == rem_cap) { rem_cap *= 2; rem = (TexRef *)realloc(rem, rem_cap * sizeof(TexRef)); }
-                rem[rem_n].y = dg->entries[e].ytd_index;
-                rem[rem_n].t = dg->entries[e].tex_index;
-                rem_n++;
-                moved++;
-            }
-            continue;
-        }
-
-        /* MIXED and REMOVE_DUPS both produce consolidated entries. */
-        /* Which entries get copied: */
-        /*   MIXED: only master is copied; dups are dropped from originals. */
-        /*   REMOVE_DUPS: every distinct name in the group is copied; all originals dropped. */
-
         if (strategy == MIGRATE_MIXED) {
-            /* Ensure room for master copy. */
+            /* Master stays in its original; one copy goes to consolidated; dups dropped. */
             if (!cur_consol || archive_total_data_size(cur_consol) + master_tex->data_size > MIGRATE_GREEN_LIMIT) {
                 if (*io_ytd_count >= max_ytds) break;
                 cur_consol = make_consolidated_ytd(base_dir, consol_seq++);
@@ -326,16 +320,9 @@ int optimizer_migrate_duplicates(YtdFile **io_ytds, int *io_ytd_count, int max_y
                 consol_created++;
             }
             consolidated_append(cur_consol, master_tex);
-            /* Drop dups (not master) from originals. */
-            for (int e = 1; e < dg->count; e++) {
-                if (rem_n == rem_cap) { rem_cap *= 2; rem = (TexRef *)realloc(rem, rem_cap * sizeof(TexRef)); }
-                rem[rem_n].y = dg->entries[e].ytd_index;
-                rem[rem_n].t = dg->entries[e].tex_index;
-                rem_n++;
-                moved++;
-            }
-        } else { /* MIGRATE_REMOVE_DUPS */
-            /* Collect distinct names. Each distinct name → one copy into consolidated. */
+            for (int e = 1; e < dg->count; e++)
+                PUSH_REMOVAL(io_ytds[dg->entries[e].ytd_index], dg->entries[e].tex_index);
+        } else { /* MIGRATE_REMOVE_DUPS: every distinct name → consolidated; all originals dropped. */
             for (int e = 0; e < dg->count; e++) {
                 DupEntry *ent = &dg->entries[e];
                 TextureEntry *src = &io_ytds[ent->ytd_index]->textures[ent->tex_index];
@@ -354,35 +341,36 @@ int optimizer_migrate_duplicates(YtdFile **io_ytds, int *io_ytd_count, int max_y
                     }
                     consolidated_append(cur_consol, src);
                 }
-                if (rem_n == rem_cap) { rem_cap *= 2; rem = (TexRef *)realloc(rem, rem_cap * sizeof(TexRef)); }
-                rem[rem_n].y = ent->ytd_index;
-                rem[rem_n].t = ent->tex_index;
-                rem_n++;
-                moved++;
+                PUSH_REMOVAL(io_ytds[ent->ytd_index], ent->tex_index);
             }
         }
     }
 done_groups:
+    #undef PUSH_REMOVAL
 
-    /* Remove collected texture entries from originals. Sort descending so indices stay valid.
-     * We only touch ytds in [0, orig_count_before) — never the consolidated YTDs we just appended. */
-    for (int i = 0; i < rem_n - 1; i++) {
-        for (int j = i + 1; j < rem_n; j++) {
-            bool swap = false;
-            if (rem[j].y > rem[i].y) swap = true;
-            else if (rem[j].y == rem[i].y && rem[j].t > rem[i].t) swap = true;
-            if (swap) { TexRef tmp = rem[i]; rem[i] = rem[j]; rem[j] = tmp; }
-        }
-    }
-    for (int i = 0; i < rem_n; i++) {
-        if (rem[i].y < orig_count_before)
-            archive_remove_texture(io_ytds[rem[i].y], rem[i].t);
-    }
-
-    free(rem);
     optimizer_free_groups(groups, group_count);
 
-    if (out_textures_moved) *out_textures_moved = moved;
+    if (out_removals) *out_removals = rem;
+    else free(rem);
+    if (out_removal_count) *out_removal_count = rem_n;
+    if (out_textures) *out_textures = moved;
     if (out_consolidated) *out_consolidated = consol_created;
     return consol_created;
+}
+
+void optimizer_apply_removals(PendingRemoval *removals, int count) {
+    if (!removals || count <= 0) return;
+
+    /* Sort by (ytd pointer, tex_index descending) so removals within one YTD
+     * are applied high-index-first and stay valid. */
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = i + 1; j < count; j++) {
+            bool swap = false;
+            if (removals[j].ytd > removals[i].ytd) swap = true;
+            else if (removals[j].ytd == removals[i].ytd && removals[j].tex_index > removals[i].tex_index) swap = true;
+            if (swap) { PendingRemoval tmp = removals[i]; removals[i] = removals[j]; removals[j] = tmp; }
+        }
+    }
+    for (int i = 0; i < count; i++)
+        archive_remove_texture(removals[i].ytd, removals[i].tex_index);
 }

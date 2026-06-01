@@ -231,20 +231,22 @@ static int parse_texdict(const uint8_t *vdata, size_t vdata_len,
  */
 
 static uint64_t find_shader_group_texdict(const uint8_t *vdata, size_t vdata_len, uint64_t drawable_ptr) {
-    if (drawable_ptr == 0) return 0;
+    if (drawable_ptr < VIRTUAL_BASE) return 0;
     size_t draw_off = (size_t)(drawable_ptr - VIRTUAL_BASE);
-    if (draw_off + 0x30 > vdata_len) return 0;
+    if (draw_off + 0x18 > vdata_len) return 0;
 
-    /* Drawable->ShaderGroup is at offset 0x20 */
-    uint64_t shader_group_ptr = rd64(vdata + draw_off + 0x20);
-    if (shader_group_ptr == 0 || shader_group_ptr < VIRTUAL_BASE) return 0;
+    /* DrawableBase->ShaderGroupPointer is at offset 0x10
+     * (0x10 ResourceFileBase header: VFT + Unknown + FilePagesInfoPointer). */
+    uint64_t shader_group_ptr = rd64(vdata + draw_off + 0x10);
+    if (shader_group_ptr < VIRTUAL_BASE) return 0;
 
     size_t sg_off = (size_t)(shader_group_ptr - VIRTUAL_BASE);
-    if (sg_off + 0x40 > vdata_len) return 0;
+    if (sg_off + 0x10 > vdata_len) return 0;
 
-    /* ShaderGroup->TextureDictionary is at offset 0x30 */
-    uint64_t texdict_ptr = rd64(vdata + sg_off + 0x30);
-    if (texdict_ptr == 0 || texdict_ptr < VIRTUAL_BASE) return 0;
+    /* ShaderGroup->TextureDictionaryPointer is at offset 0x08
+     * (0x00 VFT, 0x04 Unknown_4h, 0x08 TextureDictionaryPointer). */
+    uint64_t texdict_ptr = rd64(vdata + sg_off + 0x08);
+    if (texdict_ptr < VIRTUAL_BASE) return 0;
 
     return texdict_ptr;
 }
@@ -298,8 +300,9 @@ YtdFile *ydr_load(const wchar_t *filepath) {
          * +0x18: count/capacity
          * Each item is a pointer to a Drawable
          */
-        uint64_t items_ptr = rd64(vdata + 0x30);
-        uint16_t count = rd16(vdata + 0x28);
+        /* DrawableDictionary: 0x30 DrawablesPointer, 0x38 DrawablesCount1. */
+        uint64_t items_ptr = (vdata_len >= 0x38) ? rd64(vdata + 0x30) : 0;
+        uint16_t count = (vdata_len >= 0x3A) ? rd16(vdata + 0x38) : 0;
         if (count > 0 && count < 1024 && items_ptr >= VIRTUAL_BASE) {
             size_t items_off = (size_t)(items_ptr - VIRTUAL_BASE);
             if (items_off + count * 8 <= vdata_len) {
@@ -316,11 +319,11 @@ YtdFile *ydr_load(const wchar_t *filepath) {
             }
         }
     } else if (is_yft) {
-        /* YFT: Fragment
-         * +0x58: Drawable pointer (the main drawable)
-         */
-        if (vdata_len >= 0x60) {
-            uint64_t draw_ptr = rd64(vdata + 0x58);
+        /* YFT: FragType (ResourceFileBase 0x10 header, then 0x10/0x18 unknown,
+         * 0x20 BoundingSphereCenter+radius, 0x30 DrawablePointer).
+         * The embedded textures live in the main FragDrawable's ShaderGroup. */
+        if (vdata_len >= 0x38) {
+            uint64_t draw_ptr = rd64(vdata + 0x30);
             uint64_t td = find_shader_group_texdict(vdata, vdata_len, draw_ptr);
             if (td) {
                 total_loaded = parse_texdict(vdata, vdata_len, pdata, pdata_len,
