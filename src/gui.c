@@ -73,6 +73,8 @@ typedef struct {
 #define IDM_CTX_RESIZE_CUSTOM 2003
 #define IDM_CTX_EXPORT_DDS   2004
 #define IDM_CTX_REMOVE       2005
+#define IDM_CTX_UNLOAD       2006
+#define IDM_ARCH_UNLOAD      2007
 #define IDM_CTX_FMT_BC1      2010
 #define IDM_CTX_FMT_BC3      2011
 #define IDM_CTX_FMT_BC5      2012
@@ -119,7 +121,9 @@ static void choose_recompress_mode(void);
 static void do_custom_resize(int ytd_idx, int tex_idx);
 static void do_texture_export_dds(int ytd_idx, int tex_idx);
 static void do_texture_remove(int ytd_idx, int tex_idx);
+static void do_texture_unload(int ytd_idx, int tex_idx);
 static void unload_rpf_archive(int ytd_idx);
+static int texture_grid_height(YtdFile *ytd, int area_w);
 static void select_language(void);
 static void apply_archive_sort(void);
 static bool select_import_types(HWND parent);
@@ -1718,7 +1722,9 @@ static void choose_recompress_mode(void) {
     }
 
     dialog.hwndParent = g_app.hwnd_main;
-    dialog.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    /* Buttons carry a "title\nnote" layout, which only renders correctly as
+     * command-link buttons; without this flag the \n looks broken. */
+    dialog.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_COMMAND_LINKS;
     dialog.pszWindowTitle = L"Recompress";
     dialog.pszMainInstruction = L"Choose how to recompress the loaded textures";
     dialog.pszContent =
@@ -1844,6 +1850,11 @@ static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int
     AppendMenuW(hMenu, MF_STRING, IDM_CTX_EXPORT_DDS,
         trw(L"Export as DDS...", L"Exportar como DDS...", L"Exportar como DDS...", L"Экспортировать DDS..."));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    /* Unload (revert) is only meaningful once the texture was edited. */
+    AppendMenuW(hMenu, MF_STRING | (tex->has_orig ? MF_ENABLED : (MF_GRAYED | MF_DISABLED)),
+        IDM_CTX_UNLOAD,
+        trw(L"Unload changes (revert to original)", L"Descartar alterações (voltar ao original)",
+            L"Descartar cambios (volver al original)", L"Откатить изменения (к оригиналу)"));
     AppendMenuW(hMenu, MF_STRING, IDM_CTX_REMOVE,
         trw(L"Remove Texture", L"Remover textura", L"Eliminar textura", L"Удалить текстуру"));
 
@@ -1884,6 +1895,9 @@ static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int
     case IDM_CTX_EXPORT_DDS:
         do_texture_export_dds(ytd_idx, tex_idx);
         break;
+    case IDM_CTX_UNLOAD:
+        do_texture_unload(ytd_idx, tex_idx);
+        break;
     case IDM_CTX_REMOVE:
         do_texture_remove(ytd_idx, tex_idx);
         break;
@@ -1891,6 +1905,22 @@ static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int
 }
 
 /* ── Texture actions ───────────────────────────────────────────────── */
+
+static void do_texture_unload(int ytd_idx, int tex_idx) {
+    YtdFile *ytd = g_app.ytds[ytd_idx];
+    TextureEntry *te = &ytd->textures[tex_idx];
+    if (!tex_revert_original(te)) {
+        gui_update_status("'%s' has no changes to unload", te->name);
+        return;
+    }
+    /* Mark the archive modified so the reverted (original) bytes are written
+     * back on Save All, replacing any previously-saved edit. */
+    ytd->modified = true;
+    LOG("do_texture_unload: '%s' reverted to %dx%d %s",
+        te->name, te->width, te->height, tex_format_name(te->format));
+    gui_update_status("Unloaded changes on '%s' (reverted to original)", te->name);
+    InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+}
 
 static bool do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, TexFormat fmt, int max_mips) {
     YtdFile *ytd = g_app.ytds[ytd_idx];
@@ -1941,6 +1971,9 @@ static bool do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, Te
                                            (max_mips == -2 ? te->mip_count : (max_mips == -1 ? 13 : max_mips)), &mip_count, &total_size);
     bc7enc_free(resized);
     if (!new_data) { gui_update_status("Failed to encode"); return false; }
+
+    /* Snapshot the pre-edit state once so Unload can revert instantly. */
+    tex_save_original(te);
 
     /* Replace texture data */
     free(te->data);
@@ -2012,6 +2045,7 @@ static void do_texture_remove(int ytd_idx, int tex_idx) {
     removed_name[EO_MAX_NAME - 1] = 0;
 
     free(tex->data);
+    free(tex->orig_data);
     free(tex->wtd_meta);
     /* Shift remaining textures down */
     for (int i = tex_idx; i < ytd->texture_count - 1; i++) {
@@ -2041,6 +2075,83 @@ static void unload_rpf_archive(int ytd_idx) {
     gui_update_status("Unloaded '%s' from the application; original RPF was not changed", name);
     InvalidateRect(g_app.hwnd_content, NULL, TRUE);
     InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
+}
+
+/* Unload a whole archive (regular file, RPF group + its entries, or one RPF
+ * entry) from the workspace. Disk is never modified. */
+static void do_unload_archive(int idx) {
+    if (idx < 0 || idx >= g_app.ytd_count) return;
+    YtdFile *a = g_app.ytds[idx];
+    char name[EO_MAX_NAME];
+    strncpy(name, a->name, EO_MAX_NAME);
+    name[EO_MAX_NAME - 1] = 0;
+
+    if (a->from_rpf) { unload_rpf_archive(idx); return; }
+
+    if (a->is_rpf_group) {
+        /* Free all entries that belong to this RPF group first. */
+        for (int i = g_app.ytd_count - 1; i >= 0; i--) {
+            if (g_app.ytds[i]->rpf_parent != a) continue;
+            ytd_free(g_app.ytds[i]);
+            for (int j = i; j < g_app.ytd_count - 1; j++) g_app.ytds[j] = g_app.ytds[j + 1];
+            g_app.ytd_count--;
+        }
+        /* The group's index may have shifted; locate it again. */
+        for (int i = 0; i < g_app.ytd_count; i++) {
+            if (g_app.ytds[i] != a) continue;
+            ytd_free(a);
+            for (int j = i; j < g_app.ytd_count - 1; j++) g_app.ytds[j] = g_app.ytds[j + 1];
+            g_app.ytd_count--;
+            break;
+        }
+        gui_update_status("Unloaded RPF '%s' and its entries (disk untouched)", name);
+    } else {
+        if (a->is_preview) reset_migration_state();  /* a preview consolidated: drop pending too */
+        ytd_free(a);
+        for (int j = idx; j < g_app.ytd_count - 1; j++) g_app.ytds[j] = g_app.ytds[j + 1];
+        g_app.ytd_count--;
+        gui_update_status("Unloaded '%s' from the workspace (disk untouched)", name);
+    }
+    InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+    InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
+}
+
+/* Find the archive whose header row (folder card or RPF entry row) is at my. */
+static int hit_test_archive_header(int my, int area_w) {
+    int y = 8;
+    for (int i = 0; i < g_app.ytd_count; i++) {
+        YtdFile *ytd = g_app.ytds[i];
+        if (ytd->from_rpf) continue;
+        if (my >= y && my < y + FOLDER_H) return i;
+        y += FOLDER_H + 4;
+        if (!ytd->expanded) continue;
+        if (ytd->is_rpf_group) {
+            for (int c = 0; c < g_app.ytd_count; c++) {
+                YtdFile *child = g_app.ytds[c];
+                if (child->rpf_parent != ytd) continue;
+                if (my >= y && my < y + RPF_ENTRY_H) return c;
+                y += RPF_ENTRY_H + 4;
+                if (child->expanded) y += texture_grid_height(child, area_w);
+            }
+        } else {
+            y += texture_grid_height(ytd, area_w);
+        }
+    }
+    return -1;
+}
+
+static void show_archive_context_menu(HWND hwnd, int sx, int sy, int idx) {
+    YtdFile *a = g_app.ytds[idx];
+    HMENU m = CreatePopupMenu();
+    const wchar_t *label =
+        a->is_rpf_group ? trw(L"Unload RPF (remove from workspace)", L"Descarregar RPF (remover do workspace)",
+                              L"Descargar RPF (quitar del espacio)", L"Выгрузить RPF (убрать из рабочей области)")
+                        : trw(L"Unload (remove from workspace)", L"Descarregar (remover do workspace)",
+                              L"Descargar (quitar del espacio)", L"Выгрузить (убрать из рабочей области)");
+    AppendMenuW(m, MF_STRING, IDM_ARCH_UNLOAD, label);
+    UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, hwnd, NULL);
+    DestroyMenu(m);
+    if (cmd == IDM_ARCH_UNLOAD) do_unload_archive(idx);
 }
 
 /* ── Content painting ──────────────────────────────────────────────── */
@@ -2415,10 +2526,15 @@ static LRESULT CALLBACK ContentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         int mx = GET_X_LPARAM(lp);
         int my = GET_Y_LPARAM(lp) + g_app.scroll_y;
         int ytd_idx, tex_idx;
+        POINT screen_pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ClientToScreen(hwnd, &screen_pt);
         if (hit_test_texture(mx, my, &ytd_idx, &tex_idx, NULL, NULL)) {
-            POINT screen_pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            ClientToScreen(hwnd, &screen_pt);
             show_texture_context_menu(hwnd, screen_pt.x, screen_pt.y, ytd_idx, tex_idx);
+        } else {
+            RECT crc; GetClientRect(hwnd, &crc);
+            int ai = hit_test_archive_header(my, crc.right);
+            if (ai >= 0)
+                show_archive_context_menu(hwnd, screen_pt.x, screen_pt.y, ai);
         }
         return 0;
     }

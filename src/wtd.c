@@ -506,6 +506,7 @@ void wtd_free(YtdFile *wtd) {
     
     for (int i = 0; i < wtd->texture_count; i++) {
         free(wtd->textures[i].data);
+        free(wtd->textures[i].orig_data);
         free(wtd->textures[i].wtd_meta);
     }
     free(wtd->textures);

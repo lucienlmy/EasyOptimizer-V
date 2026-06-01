@@ -587,6 +587,7 @@ void ytd_free(YtdFile *ytd) {
     }
     for (int i = 0; i < ytd->texture_count; i++) {
         free(ytd->textures[i].data);
+        free(ytd->textures[i].orig_data);
     }
     free(ytd->textures);
     free(ytd);

@@ -352,6 +352,45 @@ uint8_t *tex_generate_mips(const uint8_t *rgba, int w, int h, TexFormat fmt,
     return result;
 }
 
+void tex_save_original(TextureEntry *te) {
+    if (!te || te->has_orig) return;            /* snapshot only once */
+    if (!te->data || te->data_size == 0) return;
+    te->orig_data = (uint8_t *)malloc(te->data_size);
+    if (!te->orig_data) return;                 /* OOM: skip snapshot, edit still proceeds */
+    memcpy(te->orig_data, te->data, te->data_size);
+    te->orig_data_size = te->data_size;
+    te->orig_width = te->width;
+    te->orig_height = te->height;
+    te->orig_format = te->format;
+    te->orig_mip_count = te->mip_count;
+    te->orig_stride = te->stride;
+    te->has_orig = true;
+}
+
+bool tex_revert_original(TextureEntry *te) {
+    if (!te || !te->has_orig) return false;
+    free(te->data);
+    te->data = te->orig_data;                   /* transfer ownership back (no copy) */
+    te->data_size = te->orig_data_size;
+    te->width = te->orig_width;
+    te->height = te->orig_height;
+    te->format = te->orig_format;
+    te->mip_count = te->orig_mip_count;
+    te->stride = te->orig_stride;
+    te->orig_data = NULL;
+    te->orig_data_size = 0;
+    te->has_orig = false;
+    return true;
+}
+
+void tex_free_original(TextureEntry *te) {
+    if (!te) return;
+    free(te->orig_data);
+    te->orig_data = NULL;
+    te->orig_data_size = 0;
+    te->has_orig = false;
+}
+
 bool tex_alpha_in_use(const TextureEntry *tex) {
     /* Formats without an alpha channel: BC1 has 1-bit punch-through but
      * we still treat it as "no alpha" for downgrade purposes. */

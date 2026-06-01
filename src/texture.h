@@ -11,6 +11,14 @@ bool tex_format_can_encode(TexFormat fmt);
  * Used to decide whether BC3/BC7 can be safely downgraded to BC1 without losing info. */
 bool tex_alpha_in_use(const TextureEntry *tex);
 
+/* Original-state snapshot for instant Unload/revert.
+ * tex_save_original captures the current bytes/dims once (no-op if already saved).
+ * tex_revert_original restores them (no-op if nothing saved) and drops the snapshot.
+ * tex_free_original releases the snapshot without reverting. */
+void tex_save_original(TextureEntry *te);
+bool tex_revert_original(TextureEntry *te);
+void tex_free_original(TextureEntry *te);
+
 /* Encode RGBA pixels to compressed format. Returns allocated data, sets out_size. */
 uint8_t *tex_encode_bc(const uint8_t *rgba, int w, int h, TexFormat fmt, size_t *out_size);
 

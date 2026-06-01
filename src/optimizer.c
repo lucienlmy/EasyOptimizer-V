@@ -190,6 +190,9 @@ int optimizer_smart_resize(YtdFile *ytd, int max_width, int max_height, TexForma
         bc7enc_free(resized_rgba);
         if (!new_data) continue;
 
+        /* Snapshot the pre-edit state once so Unload can revert instantly. */
+        tex_save_original(te);
+
         /* Replace texture data */
         free(te->data);
         te->data = new_data;
@@ -246,6 +249,10 @@ static bool consolidated_append(YtdFile *dst, const TextureEntry *src) {
     TextureEntry *nt = &dst->textures[dst->texture_count];
     memcpy(nt, src, sizeof(TextureEntry));
     nt->wtd_meta = NULL;
+    /* The copy must not share the source's snapshot pointer (double-free). */
+    nt->has_orig = false;
+    nt->orig_data = NULL;
+    nt->orig_data_size = 0;
     if (src->data && src->data_size > 0) {
         nt->data = (uint8_t *)malloc(src->data_size);
         if (!nt->data) return false;
@@ -261,6 +268,7 @@ static bool consolidated_append(YtdFile *dst, const TextureEntry *src) {
 static void archive_remove_texture(YtdFile *a, int idx) {
     if (idx < 0 || idx >= a->texture_count) return;
     free(a->textures[idx].data);
+    free(a->textures[idx].orig_data);
     free(a->textures[idx].wtd_meta);
     for (int i = idx; i < a->texture_count - 1; i++)
         a->textures[i] = a->textures[i + 1];

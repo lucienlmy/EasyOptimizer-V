@@ -39,6 +39,16 @@ typedef struct {
     uint8_t *data;
     size_t data_size;
     void *wtd_meta;
+
+    /* Snapshot of the on-load state, captured lazily before the first edit so
+     * "Unload" can revert resize/recompress instantly without touching disk. */
+    bool has_orig;
+    uint8_t *orig_data;
+    size_t orig_data_size;
+    int orig_width, orig_height;
+    TexFormat orig_format;
+    int orig_mip_count;
+    int orig_stride;
 } TextureEntry;
 
 typedef enum {

@@ -4,6 +4,9 @@
 #include "nvtt_c_wrapper.h"
 #include "log.h"
 
+/* Note: comctl32 v6 visual styles + DPI awareness are already enabled via the
+ * embedded manifest (res/app.manifest, linked through res/app.rc). */
+
 FILE *g_log_file = NULL;
 
 LONG WINAPI CrashHandler(EXCEPTION_POINTERS *ExceptionInfo) {
