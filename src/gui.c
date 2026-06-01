@@ -36,6 +36,7 @@ AppState g_app = {0};
 #define ID_SAVE_TO_FOLDER         4002
 #define ID_SAVE_PROJECT_CACHE     4003
 #define ID_SIDEBAR_LANGUAGE       1009
+#define ID_SIDEBAR_SORT           1011
 
 #define IDC_RES_MAXW 3011
 #define IDC_RES_MAXH 3012
@@ -102,6 +103,7 @@ static void do_custom_resize(int ytd_idx, int tex_idx);
 static void do_texture_export_dds(int ytd_idx, int tex_idx);
 static void do_texture_remove(int ytd_idx, int tex_idx);
 static void select_language(void);
+static void apply_archive_sort(void);
 
 /* ── Sidebar button struct ─────────────────────────────────────────── */
 
@@ -113,7 +115,7 @@ typedef struct {
 } SidebarButton;
 
 static SidebarButton g_sidebar_btns[] = {
-    {{0}, ID_SIDEBAR_ADDYTD,     L"Add YTD",        false},
+    {{0}, ID_SIDEBAR_ADDYTD,     L"Add File",       false},
     {{0}, ID_SIDEBAR_ADDFOLDER,  L"Add Folder",     false},
     {{0}, ID_SIDEBAR_SAVEALL,    L"Save All",       false},
     {{0}, ID_SIDEBAR_CLEARALL,   L"Clear All",      false},
@@ -122,6 +124,7 @@ static SidebarButton g_sidebar_btns[] = {
     {{0}, ID_SIDEBAR_FASTRECOMP, L"Fast Recompress",false},
     {{0}, ID_SIDEBAR_TOGGLE_ENC, L"Encoder: CPU",   false},
     {{0}, ID_SIDEBAR_LANGUAGE,   L"Language: English", false},
+    {{0}, ID_SIDEBAR_SORT,       L"Sort: Name", false},
 };
 #define SIDEBAR_BTN_COUNT (sizeof(g_sidebar_btns)/sizeof(g_sidebar_btns[0]))
 
@@ -129,13 +132,74 @@ typedef enum {
     UI_LANG_ENGLISH,
     UI_LANG_PORTUGUESE,
     UI_LANG_SPANISH,
-    UI_LANG_RUSSIAN
+    UI_LANG_RUSSIAN,
+    UI_LANG_TURKISH,
+    UI_LANG_MANDARIN,
+    UI_LANG_HINDI,
+    UI_LANG_JAPANESE,
+    UI_LANG_ARABIC,
+    UI_LANG_BENGALI,
+    UI_LANG_FRENCH,
+    UI_LANG_GERMAN,
+    UI_LANG_INDONESIAN,
+    UI_LANG_KOREAN,
+    UI_LANG_ITALIAN
 } AppLanguage;
 
 static AppLanguage g_language = UI_LANG_ENGLISH;
 
+typedef enum {
+    SORT_BY_NAME,
+    SORT_BY_TYPE,
+    SORT_BY_SIZE,
+    SORT_BY_TEXTURE_COUNT,
+    SORT_BY_MODIFIED
+} ArchiveSortMode;
+
+static ArchiveSortMode g_sort_mode = SORT_BY_NAME;
+static int g_scan_candidates = 0;
+static int g_scan_failed = 0;
+
+static size_t archive_total_size(const YtdFile *archive) {
+    size_t total = 0;
+    for (int i = 0; i < archive->texture_count; i++)
+        total += archive->textures[i].data_size;
+    return total;
+}
+
+static int compare_archives(const void *left, const void *right) {
+    const YtdFile *a = *(YtdFile * const *)left;
+    const YtdFile *b = *(YtdFile * const *)right;
+    switch (g_sort_mode) {
+        case SORT_BY_TYPE:
+            return _wcsicmp(PathFindExtensionW(a->file_path), PathFindExtensionW(b->file_path));
+        case SORT_BY_SIZE: {
+            size_t as = archive_total_size(a), bs = archive_total_size(b);
+            return (as < bs) - (as > bs);
+        }
+        case SORT_BY_TEXTURE_COUNT:
+            return (a->texture_count < b->texture_count) - (a->texture_count > b->texture_count);
+        case SORT_BY_MODIFIED:
+            return (a->modified < b->modified) - (a->modified > b->modified);
+        default:
+            return _stricmp(a->name, b->name);
+    }
+}
+
+static void apply_archive_sort(void) {
+    if (g_app.ytd_count > 1)
+        qsort(g_app.ytds, g_app.ytd_count, sizeof(g_app.ytds[0]), compare_archives);
+}
+
+static bool is_supported_archive_path(const wchar_t *path) {
+    const wchar_t *ext = PathFindExtensionW(path);
+    return _wcsicmp(ext, L".ytd") == 0 || _wcsicmp(ext, L".wtd") == 0 ||
+           _wcsicmp(ext, L".ydr") == 0 || _wcsicmp(ext, L".yft") == 0 ||
+           _wcsicmp(ext, L".ydd") == 0;
+}
+
 static const wchar_t *trw(const wchar_t *en, const wchar_t *pt,
-                          const wchar_t *es, const wchar_t *ru) {
+                           const wchar_t *es, const wchar_t *ru) {
     switch (g_language) {
         case UI_LANG_PORTUGUESE: return pt;
         case UI_LANG_SPANISH: return es;
@@ -144,18 +208,86 @@ static const wchar_t *trw(const wchar_t *en, const wchar_t *pt,
     }
 }
 
+static const wchar_t *trw8(const wchar_t *en, const wchar_t *pt, const wchar_t *es,
+                            const wchar_t *ru, const wchar_t *tr, const wchar_t *zh,
+                            const wchar_t *hi, const wchar_t *ja) {
+    switch (g_language) {
+        case UI_LANG_PORTUGUESE: return pt;
+        case UI_LANG_SPANISH: return es;
+        case UI_LANG_RUSSIAN: return ru;
+        case UI_LANG_TURKISH: return tr;
+        case UI_LANG_MANDARIN: return zh;
+        case UI_LANG_HINDI: return hi;
+        case UI_LANG_JAPANESE: return ja;
+        default: return en;
+    }
+}
+
+static const wchar_t *trw9(const wchar_t *en, const wchar_t *pt, const wchar_t *es,
+                            const wchar_t *ru, const wchar_t *tr, const wchar_t *zh,
+                            const wchar_t *hi, const wchar_t *ja, const wchar_t *ar) {
+    if (g_language == UI_LANG_ARABIC) return ar;
+    return trw8(en, pt, es, ru, tr, zh, hi, ja);
+}
+
+static const wchar_t *language_button_text(void) {
+    switch (g_language) {
+        case UI_LANG_PORTUGUESE: return L"Idioma: Português";
+        case UI_LANG_SPANISH: return L"Idioma: Español";
+        case UI_LANG_RUSSIAN: return L"Язык: Русский";
+        case UI_LANG_TURKISH: return L"Dil: Türkçe";
+        case UI_LANG_MANDARIN: return L"语言: 中文";
+        case UI_LANG_HINDI: return L"भाषा: हिन्दी";
+        case UI_LANG_JAPANESE: return L"言語: 日本語";
+        case UI_LANG_ARABIC: return L"اللغة: العربية";
+        case UI_LANG_BENGALI: return L"ভাষা: বাংলা";
+        case UI_LANG_FRENCH: return L"Langue : Français";
+        case UI_LANG_GERMAN: return L"Sprache: Deutsch";
+        case UI_LANG_INDONESIAN: return L"Bahasa: Indonesia";
+        case UI_LANG_KOREAN: return L"언어: 한국어";
+        case UI_LANG_ITALIAN: return L"Lingua: Italiano";
+        default: return L"Language: English";
+    }
+}
+
 static void update_sidebar_labels(void) {
-    g_sidebar_btns[0].text = trw(L"Add YTD", L"Adicionar YTD", L"Añadir YTD", L"Добавить YTD");
-    g_sidebar_btns[1].text = trw(L"Add Folder", L"Adicionar pasta", L"Añadir carpeta", L"Добавить папку");
-    g_sidebar_btns[2].text = trw(L"Save All", L"Salvar tudo", L"Guardar todo", L"Сохранить все");
-    g_sidebar_btns[3].text = trw(L"Clear All", L"Limpar tudo", L"Limpiar todo", L"Очистить все");
-    g_sidebar_btns[4].text = trw(L"Find Duplicates", L"Buscar duplicadas", L"Buscar duplicados", L"Найти дубликаты");
-    g_sidebar_btns[5].text = trw(L"Smart Optimize", L"Otimização inteligente", L"Optimización inteligente", L"Умная оптимизация");
-    g_sidebar_btns[6].text = trw(L"Fast Recompress", L"Recompressão rápida", L"Recompresión rápida", L"Быстрое сжатие");
+    g_sidebar_btns[0].text = trw9(L"Add File", L"Adicionar arquivo", L"Añadir archivo", L"Добавить файл", L"Dosya ekle", L"添加文件", L"फ़ाइल जोड़ें", L"ファイル追加", L"إضافة ملف");
+    g_sidebar_btns[1].text = trw9(L"Add Folder", L"Adicionar pasta", L"Añadir carpeta", L"Добавить папку", L"Klasör ekle", L"添加文件夹", L"फ़ोल्डर जोड़ें", L"フォルダー追加", L"إضافة مجلد");
+    g_sidebar_btns[2].text = trw9(L"Save All", L"Salvar tudo", L"Guardar todo", L"Сохранить все", L"Tümünü kaydet", L"全部保存", L"सभी सहेजें", L"すべて保存", L"حفظ الكل");
+    g_sidebar_btns[3].text = trw9(L"Clear All", L"Limpar tudo", L"Limpiar todo", L"Очистить все", L"Tümünü temizle", L"全部清除", L"सभी साफ़ करें", L"すべてクリア", L"مسح الكل");
+    g_sidebar_btns[4].text = trw9(L"Find Duplicates", L"Buscar duplicadas", L"Buscar duplicados", L"Найти дубликаты", L"Yinelenenleri bul", L"查找重复项", L"डुप्लिकेट खोजें", L"重複を検索", L"البحث عن التكرارات");
+    g_sidebar_btns[5].text = trw9(L"Smart Optimize", L"Otimização inteligente", L"Optimización inteligente", L"Умная оптимизация", L"Akıllı optimize", L"智能优化", L"स्मार्ट अनुकूलन", L"スマート最適化", L"تحسين ذكي");
+    g_sidebar_btns[6].text = trw9(L"Fast Recompress", L"Recompressão rápida", L"Recompresión rápida", L"Быстрое сжатие", L"Hızlı sıkıştır", L"快速重新压缩", L"तेज़ पुनःसंपीड़न", L"高速再圧縮", L"إعادة ضغط سريعة");
     g_sidebar_btns[7].text = g_app.use_gpu_encoding
         ? trw(L"Encoder: GPU", L"Encoder: GPU", L"Codificador: GPU", L"Кодировщик: GPU")
         : trw(L"Encoder: CPU", L"Encoder: CPU", L"Codificador: CPU", L"Кодировщик: CPU");
-    g_sidebar_btns[8].text = trw(L"Language: English", L"Idioma: Português", L"Idioma: Español", L"Язык: Русский");
+    if (g_language == UI_LANG_BENGALI) {
+        g_sidebar_btns[0].text = L"ফাইল যোগ করুন"; g_sidebar_btns[1].text = L"ফোল্ডার যোগ করুন";
+        g_sidebar_btns[2].text = L"সব সংরক্ষণ"; g_sidebar_btns[3].text = L"সব মুছুন";
+    } else if (g_language == UI_LANG_FRENCH) {
+        g_sidebar_btns[0].text = L"Ajouter fichier"; g_sidebar_btns[1].text = L"Ajouter dossier";
+        g_sidebar_btns[2].text = L"Tout enregistrer"; g_sidebar_btns[3].text = L"Tout effacer";
+    } else if (g_language == UI_LANG_GERMAN) {
+        g_sidebar_btns[0].text = L"Datei hinzufügen"; g_sidebar_btns[1].text = L"Ordner hinzufügen";
+        g_sidebar_btns[2].text = L"Alles speichern"; g_sidebar_btns[3].text = L"Alles löschen";
+    } else if (g_language == UI_LANG_INDONESIAN) {
+        g_sidebar_btns[0].text = L"Tambah file"; g_sidebar_btns[1].text = L"Tambah folder";
+        g_sidebar_btns[2].text = L"Simpan semua"; g_sidebar_btns[3].text = L"Hapus semua";
+    } else if (g_language == UI_LANG_KOREAN) {
+        g_sidebar_btns[0].text = L"파일 추가"; g_sidebar_btns[1].text = L"폴더 추가";
+        g_sidebar_btns[2].text = L"모두 저장"; g_sidebar_btns[3].text = L"모두 지우기";
+    } else if (g_language == UI_LANG_ITALIAN) {
+        g_sidebar_btns[0].text = L"Aggiungi file"; g_sidebar_btns[1].text = L"Aggiungi cartella";
+        g_sidebar_btns[2].text = L"Salva tutto"; g_sidebar_btns[3].text = L"Cancella tutto";
+    }
+    g_sidebar_btns[8].text = language_button_text();
+    switch (g_sort_mode) {
+        case SORT_BY_TYPE: g_sidebar_btns[9].text = trw8(L"Sort: Type", L"Ordenar: Tipo", L"Ordenar: Tipo", L"Сорт.: Тип", L"Sırala: Tür", L"排序: 类型", L"क्रम: प्रकार", L"並べ替え: 種類"); break;
+        case SORT_BY_SIZE: g_sidebar_btns[9].text = trw8(L"Sort: Size", L"Ordenar: Tamanho", L"Ordenar: Tamaño", L"Сорт.: Размер", L"Sırala: Boyut", L"排序: 大小", L"क्रम: आकार", L"並べ替え: サイズ"); break;
+        case SORT_BY_TEXTURE_COUNT: g_sidebar_btns[9].text = trw8(L"Sort: Textures", L"Ordenar: Texturas", L"Ordenar: Texturas", L"Сорт.: Текстуры", L"Sırala: Dokular", L"排序: 纹理数", L"क्रम: टेक्सचर", L"並べ替え: テクスチャ"); break;
+        case SORT_BY_MODIFIED: g_sidebar_btns[9].text = trw8(L"Sort: Modified", L"Ordenar: Modificados", L"Ordenar: Modificados", L"Сорт.: Изменены", L"Sırala: Değişen", L"排序: 已修改", L"क्रम: संशोधित", L"並べ替え: 更新"); break;
+        default: g_sidebar_btns[9].text = trw8(L"Sort: Name", L"Ordenar: Nome", L"Ordenar: Nombre", L"Сорт.: Имя", L"Sırala: Ad", L"排序: 名称", L"क्रम: नाम", L"並べ替え: 名前"); break;
+    }
 }
 
 /* ── Init ──────────────────────────────────────────────────────────── */
@@ -287,30 +419,52 @@ void gui_update_status(const char *fmt, ...) {
 /* ── File open dialog ──────────────────────────────────────────────── */
 
 static void open_file_dialog(HWND parent) {
-    wchar_t files[4096] = {0};
-    OPENFILENAMEW ofn = {sizeof(ofn)};
-    ofn.hwndOwner = parent;
-    ofn.lpstrFilter = L"GTA V Textures\0*.ytd;*.wtd;*.ydr;*.yft;*.ydd\0YTD Files\0*.ytd\0WTD Files\0*.wtd\0Model Files (YDR/YFT/YDD)\0*.ydr;*.yft;*.ydd\0All Files\0*.*\0";
-    ofn.lpstrFile = files;
-    ofn.nMaxFile = 4096;
-    ofn.Flags = OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_FILEMUSTEXIST;
+    IFileOpenDialog *pfd = NULL;
+    HRESULT hr = CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
+                                  &IID_IFileOpenDialog, (void **)&pfd);
+    if (FAILED(hr) || !pfd) {
+        gui_update_status("Failed to open file picker");
+        return;
+    }
 
-    if (GetOpenFileNameW(&ofn)) {
-        wchar_t *dir = files;
-        wchar_t *file = files + wcslen(files) + 1;
-        if (*file == 0) {
-            /* Single file selected */
-            gui_add_ytd(dir);
-        } else {
-            /* Multiple files */
-            while (*file) {
-                wchar_t full[MAX_PATH];
-                _snwprintf(full, MAX_PATH, L"%s\\%s", dir, file);
-                gui_add_ytd(full);
-                file += wcslen(file) + 1;
+    COMDLG_FILTERSPEC filters[] = {
+        {L"GTA texture files", L"*.ytd;*.wtd;*.ydr;*.yft;*.ydd"},
+        {L"YTD files", L"*.ytd"},
+        {L"WTD files", L"*.wtd"},
+        {L"Model files", L"*.ydr;*.yft;*.ydd"},
+        {L"All files", L"*.*"},
+    };
+    pfd->lpVtbl->SetFileTypes(pfd, ARRAYSIZE(filters), filters);
+    pfd->lpVtbl->SetFileTypeIndex(pfd, 1);
+
+    DWORD opts = 0;
+    pfd->lpVtbl->GetOptions(pfd, &opts);
+    pfd->lpVtbl->SetOptions(pfd, opts | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+    pfd->lpVtbl->SetTitle(pfd, trw(L"Select texture files", L"Selecione arquivos de textura",
+        L"Seleccione archivos de textura", L"Выберите файлы текстур"));
+
+    hr = pfd->lpVtbl->Show(pfd, parent);
+    if (SUCCEEDED(hr)) {
+        IShellItemArray *items = NULL;
+        hr = pfd->lpVtbl->GetResults(pfd, &items);
+        if (SUCCEEDED(hr) && items) {
+            DWORD count = 0;
+            items->lpVtbl->GetCount(items, &count);
+            for (DWORD i = 0; i < count; i++) {
+                IShellItem *item = NULL;
+                if (SUCCEEDED(items->lpVtbl->GetItemAt(items, i, &item)) && item) {
+                    wchar_t *path = NULL;
+                    if (SUCCEEDED(item->lpVtbl->GetDisplayName(item, SIGDN_FILESYSPATH, &path)) && path) {
+                        gui_add_ytd(path);
+                        CoTaskMemFree(path);
+                    }
+                    item->lpVtbl->Release(item);
+                }
             }
+            items->lpVtbl->Release(items);
         }
     }
+    pfd->lpVtbl->Release(pfd);
 }
 static void scan_folder_recursive(const wchar_t *dir) {
     wchar_t pattern[MAX_PATH];
@@ -325,9 +479,11 @@ static void scan_folder_recursive(const wchar_t *dir) {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             scan_folder_recursive(full);
         } else {
-            const wchar_t *ext = PathFindExtensionW(fd.cFileName);
-            if (_wcsicmp(ext, L".ytd") == 0 || _wcsicmp(ext, L".wtd") == 0 || _wcsicmp(ext, L".ydr") == 0 || _wcsicmp(ext, L".yft") == 0 || _wcsicmp(ext, L".ydd") == 0) {
+            if (is_supported_archive_path(fd.cFileName)) {
+                int before = g_app.ytd_count;
+                g_scan_candidates++;
                 gui_add_ytd(full);
+                if (g_app.ytd_count == before) g_scan_failed++;
             }
         }
     } while (FindNextFileW(hFind, &fd));
@@ -357,9 +513,12 @@ static void open_folder_dialog(HWND parent) {
             hr = psi->lpVtbl->GetDisplayName(psi, SIGDN_FILESYSPATH, &folder);
             if (SUCCEEDED(hr) && folder) {
                 int before = g_app.ytd_count;
+                g_scan_candidates = 0;
+                g_scan_failed = 0;
                 scan_folder_recursive(folder);
                 int added = g_app.ytd_count - before;
-                gui_update_status("Folder scan: added %d files", added);
+                gui_update_status("Folder scan: %d compatible, %d loaded, %d rejected",
+                    g_scan_candidates, added, g_scan_failed);
                 InvalidateRect(g_app.hwnd_content, NULL, TRUE);
                 InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
                 CoTaskMemFree(folder);
@@ -376,6 +535,10 @@ static void open_folder_dialog(HWND parent) {
 
 void gui_add_ytd(const wchar_t *path) {
     if (g_app.ytd_count >= MAX_LOADED_YTDS) return;
+    if (!is_supported_archive_path(path)) {
+        gui_update_status("Unsupported file type");
+        return;
+    }
 
     LOG("gui_add_ytd: adding file");
 
@@ -397,6 +560,7 @@ void gui_add_ytd(const wchar_t *path) {
 
     archive->expanded = true;
     g_app.ytds[g_app.ytd_count++] = archive;
+    apply_archive_sort();
     gui_update_status("Loaded %s - %d textures", archive->name, archive->texture_count);
     InvalidateRect(g_app.hwnd_content, NULL, TRUE);
     InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
@@ -437,7 +601,7 @@ static bool select_folder(HWND parent, const wchar_t *title, wchar_t *out_path, 
 }
 
 static void select_language(void) {
-    g_language = (AppLanguage)((g_language + 1) % 4);
+    g_language = (AppLanguage)((g_language + 1) % 15);
     update_sidebar_labels();
     InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
     InvalidateRect(g_app.hwnd_content, NULL, TRUE);
@@ -1302,10 +1466,10 @@ static void paint_content(HWND hwnd, HDC hdc) {
         SelectObject(hdc, theme_font_title());
         RECT text_rc = rc;
         text_rc.top = rc.bottom / 2 - 20;
-        DrawTextW(hdc, trw(L"Drop texture files here or click 'Add YTD'",
-            L"Arraste arquivos de textura aqui ou clique em 'Adicionar YTD'",
-            L"Arrastre archivos de textura aquí o haga clic en 'Añadir YTD'",
-            L"Перетащите файлы текстур сюда или нажмите 'Добавить YTD'"), -1, &text_rc,
+        DrawTextW(hdc, trw(L"Drop texture files here or click 'Add File'",
+            L"Arraste arquivos de textura aqui ou clique em 'Adicionar arquivo'",
+            L"Arrastre archivos de textura aquí o haga clic en 'Añadir archivo'",
+            L"Перетащите файлы текстур сюда или нажмите 'Добавить файл'"), -1, &text_rc,
                   DT_CENTER | DT_SINGLELINE);
         return;
     }
@@ -1647,6 +1811,13 @@ static LRESULT CALLBACK SidebarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                         InvalidateRect(hwnd, NULL, TRUE);
                         break;
                     case ID_SIDEBAR_LANGUAGE: select_language(); break;
+                    case ID_SIDEBAR_SORT:
+                        g_sort_mode = (ArchiveSortMode)((g_sort_mode + 1) % 5);
+                        apply_archive_sort();
+                        update_sidebar_labels();
+                        InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                        InvalidateRect(hwnd, NULL, TRUE);
+                        break;
                 }
                 return 0;
             }

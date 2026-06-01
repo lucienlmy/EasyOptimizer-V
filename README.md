@@ -13,7 +13,8 @@ A high-performance GTA V texture optimizer written in pure C with Win32 GUI.
 - **Folder Scanner** — Recursively scan directories for all supported file types
 - **Drag & Drop** — Drop files directly into the window to load them
 
-- **Languages** - Switch the main interface between English, Portuguese, Spanish, and Russian
+- **Sorting** - Sort loaded archives by name, type, total size, texture count, or modified state
+- **Languages** - Switch the main interface between 15 languages: English, Portuguese, Spanish, Russian, Turkish, Mandarin Chinese, Hindi, Japanese, Arabic, Bengali, French, German, Indonesian, Korean, and Italian
 
 ## Saving
 
