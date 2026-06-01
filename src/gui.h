@@ -5,6 +5,7 @@
 #include "types.h"
 
 #define MAX_LOADED_YTDS 256
+#define RPF_ENTRY_H 42
 
 typedef struct {
     HWND hwnd_main;
@@ -39,6 +40,7 @@ void gui_update_status(const char *fmt, ...);
 
 /* gui_cards.c */
 void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd, bool hovered);
+void gui_draw_rpf_entry_row(HDC hdc, int x, int y, int w, YtdFile *ytd);
 void gui_draw_texture_card(HDC hdc, int x, int y, int card_w, int card_h,
                            TextureEntry *tex, YtdFile *parent, bool hovered);
 

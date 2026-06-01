@@ -47,7 +47,7 @@ typedef enum {
     ARCHIVE_MODEL_READONLY
 } ArchiveType;
 
-typedef struct {
+typedef struct ArchiveFile {
     ArchiveType type;
     char name[EO_MAX_NAME];
     wchar_t file_path[EO_MAX_PATH];
@@ -58,6 +58,9 @@ typedef struct {
     bool is_preview;      /* consolidated YTD shown as migration preview, not yet committed */
     bool keep_originals;  /* preview only: if set, commit keeps the source textures in originals */
     bool from_rpf;         /* loaded from inside an RPF; unload only, never written back to the container */
+    bool is_rpf_group;     /* visual parent for entries discovered inside one RPF */
+    struct ArchiveFile *rpf_parent;
+    int rpf_child_count;
     
     uint32_t sys_flags;
     uint32_t gfx_flags;

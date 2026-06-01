@@ -47,7 +47,9 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd, bool hovered)
     double total_mib = total_size / (1024.0 * 1024.0);
 
     wchar_t info[128];
-    if (ytd->is_preview)
+    if (ytd->is_rpf_group)
+        _snwprintf(info, 128, L"RPF archive | %d files | expand to retrieve list", ytd->rpf_child_count);
+    else if (ytd->is_preview)
         _snwprintf(info, 128, L"PREVIEW | %d textures | %.2f MiB", ytd->texture_count, total_mib);
     else
         _snwprintf(info, 128, L"%d textures | %.2f MiB", ytd->texture_count, total_mib);
@@ -96,6 +98,51 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd, bool hovered)
     const wchar_t *arrow = ytd->expanded ? L"\x25BC" : L"\x25B6";
     RECT arrow_rc = {x + w - 30, y + 16, x + w - 8, y + 40};
     DrawTextW(hdc, arrow, -1, &arrow_rc, DT_CENTER | DT_SINGLELINE);
+}
+
+void gui_draw_rpf_entry_row(HDC hdc, int x, int y, int w, YtdFile *ytd) {
+    RECT rc = {x, y, x + w, y + RPF_ENTRY_H};
+    HBRUSH fill = CreateSolidBrush(RGB(30, 34, 39));
+    HPEN pen = CreatePen(PS_SOLID, 1, CLR_BORDER_DARK);
+    HPEN old_pen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH old_brush = (HBRUSH)SelectObject(hdc, fill);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    DeleteObject(pen);
+    DeleteObject(fill);
+
+    wchar_t name[EO_MAX_NAME];
+    MultiByteToWideChar(CP_UTF8, 0, ytd->name, -1, name, EO_MAX_NAME);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, CLR_TEXT_PRIMARY);
+    SelectObject(hdc, theme_font_small_bold());
+    RECT name_rc = {x + 14, y + 6, x + w - 126, y + 22};
+    DrawTextW(hdc, name, -1, &name_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    wchar_t info[96];
+    if (!ytd->textures)
+        _snwprintf(info, 96, L"listed only | preview unavailable");
+    else
+        _snwprintf(info, 96, L"%d textures | read-only from RPF", ytd->texture_count);
+    SetTextColor(hdc, CLR_TEXT_SECONDARY);
+    SelectObject(hdc, theme_font_small());
+    RECT info_rc = {x + 14, y + 22, x + w - 126, y + 38};
+    DrawTextW(hdc, info, -1, &info_rc, DT_LEFT | DT_SINGLELINE);
+
+    RECT unload = {x + w - 108, y + 9, x + w - 48, y + 33};
+    HBRUSH unload_fill = CreateSolidBrush(RGB(120, 45, 45));
+    FillRect(hdc, &unload, unload_fill);
+    DeleteObject(unload_fill);
+    SetTextColor(hdc, CLR_TEXT_PRIMARY);
+    SelectObject(hdc, theme_font_small_bold());
+    DrawTextW(hdc, L"Unload", -1, &unload, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SetTextColor(hdc, CLR_TEXT_PRIMARY);
+    SelectObject(hdc, theme_font_title());
+    RECT arrow = {x + w - 36, y + 10, x + w - 8, y + 34};
+    DrawTextW(hdc, ytd->expanded ? L"\x25BC" : L"\x25B6", -1, &arrow,
+              DT_CENTER | DT_SINGLELINE);
 }
 
 /* ── Texture Card ──────────────────────────────────────────────────── */

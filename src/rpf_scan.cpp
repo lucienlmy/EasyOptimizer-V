@@ -244,7 +244,7 @@ bool is_supported(const std::string &name) {
 
 std::vector<Entry> parse_entries(Reader &reader, const Archive &archive) {
     const auto header = reader.read(archive.base_offset, 16);
-    if (rd32(header.data()) != RPF_MAGIC) throw std::runtime_error("invalid RPF7 magic");
+    if (rd32(header.data()) != RPF_MAGIC) throw std::runtime_error("selected file is not a valid RPF7 archive");
     const uint32_t count = rd32(header.data() + 4);
     const uint32_t names_length = rd32(header.data() + 8);
     const uint32_t encryption = rd32(header.data() + 12);
@@ -325,9 +325,13 @@ int scan_archive(Reader &reader, const Archive &archive, RpfScanCallback callbac
                 walk(i, logical);
             } else if (entry.type == EntryType::Binary && ends_with_ci(entry.name, ".rpf")) {
                 const uint32_t nested_size = entry.file_size ? entry.file_size : entry.file_uncompressed_size;
-                imported += scan_archive(reader, Archive{
-                    archive.base_offset + static_cast<uint64_t>(entry.file_offset) * RPF_BLOCK_SIZE,
-                    nested_size, logical, entry.name}, callback, context);
+                try {
+                    imported += scan_archive(reader, Archive{
+                        archive.base_offset + static_cast<uint64_t>(entry.file_offset) * RPF_BLOCK_SIZE,
+                        nested_size, logical, entry.name}, callback, context);
+                } catch (...) {
+                    /* Some archives contain .rpf-named payloads that are not nested RPF7 containers. */
+                }
             } else if (entry.type != EntryType::Directory && is_supported(entry.name)) {
                 const auto data = entry.type == EntryType::Resource
                     ? standalone_resource(reader, archive, entry)

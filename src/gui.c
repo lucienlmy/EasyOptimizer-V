@@ -50,6 +50,7 @@ AppState g_app = {0};
 #define IDC_IMPORT_YDD    3042
 #define IDC_IMPORT_YDR    3043
 #define IDC_IMPORT_WTD    3044
+#define IDC_IMPORT_RPF    3045
 
 #define IDC_RES_MAXW 3011
 #define IDC_RES_MAXH 3012
@@ -187,9 +188,10 @@ typedef struct {
     bool ydd;
     bool ydr;
     bool wtd;
+    bool rpf;
 } ImportFilter;
 
-static ImportFilter g_import_filter = {true, true, true, true, true};
+static ImportFilter g_import_filter = {true, true, true, true, true, true};
 
 /* Pending migration preview (built by Detect, committed by Migrate Dups) */
 static PendingRemoval *g_pending_removals = NULL;
@@ -253,7 +255,7 @@ static bool should_import_archive_path(const wchar_t *path) {
     if (_wcsicmp(ext, L".ydd") == 0) return g_import_filter.ydd;
     if (_wcsicmp(ext, L".ydr") == 0) return g_import_filter.ydr;
     if (_wcsicmp(ext, L".wtd") == 0) return g_import_filter.wtd;
-    if (_wcsicmp(ext, L".rpf") == 0) return true;
+    if (_wcsicmp(ext, L".rpf") == 0) return g_import_filter.rpf;
     return false;
 }
 
@@ -496,6 +498,7 @@ static INT_PTR CALLBACK ImportTypesDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARA
         CheckDlgButton(hDlg, IDC_IMPORT_YDD, filter->ydd ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_IMPORT_YDR, filter->ydr ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_IMPORT_WTD, filter->wtd ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_IMPORT_RPF, filter->rpf ? BST_CHECKED : BST_UNCHECKED);
         return TRUE;
     case WM_COMMAND:
         if (LOWORD(wp) == IDOK) {
@@ -504,6 +507,7 @@ static INT_PTR CALLBACK ImportTypesDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARA
             filter->ydd = IsDlgButtonChecked(hDlg, IDC_IMPORT_YDD) == BST_CHECKED;
             filter->ydr = IsDlgButtonChecked(hDlg, IDC_IMPORT_YDR) == BST_CHECKED;
             filter->wtd = IsDlgButtonChecked(hDlg, IDC_IMPORT_WTD) == BST_CHECKED;
+            filter->rpf = IsDlgButtonChecked(hDlg, IDC_IMPORT_RPF) == BST_CHECKED;
             EndDialog(hDlg, IDOK);
             return TRUE;
         }
@@ -524,7 +528,7 @@ static LPDLGTEMPLATE build_import_types_template(void) {
     DLGTEMPLATE *dt = (DLGTEMPLATE *)p;
     dt->style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
     dt->dwExtendedStyle = 0;
-    dt->cdit = 7;
+    dt->cdit = 8;
     dt->x = 0; dt->y = 0; dt->cx = 180; dt->cy = 118;
     p += sizeof(DLGTEMPLATE);
     *(WORD *)p = 0; p += 2;
@@ -550,6 +554,7 @@ static LPDLGTEMPLATE build_import_types_template(void) {
     ADD_IMPORT_ITEM(BS_AUTOCHECKBOX | WS_TABSTOP, 12, 34, 70, 12, IDC_IMPORT_YFT, 0x0080, L"YFT");
     ADD_IMPORT_ITEM(BS_AUTOCHECKBOX | WS_TABSTOP, 92, 34, 70, 12, IDC_IMPORT_YDD, 0x0080, L"YDD");
     ADD_IMPORT_ITEM(BS_AUTOCHECKBOX | WS_TABSTOP, 12, 56, 70, 12, IDC_IMPORT_YDR, 0x0080, L"YDR");
+    ADD_IMPORT_ITEM(BS_AUTOCHECKBOX | WS_TABSTOP, 92, 56, 70, 12, IDC_IMPORT_RPF, 0x0080, L"RPF");
     ADD_IMPORT_ITEM(BS_DEFPUSHBUTTON | WS_TABSTOP, 32, 88, 52, 16, IDOK, 0x0080, L"Continue");
     ADD_IMPORT_ITEM(BS_PUSHBUTTON | WS_TABSTOP, 96, 88, 52, 16, IDCANCEL, 0x0080, L"Cancel");
 
@@ -700,8 +705,11 @@ static YtdFile *load_archive_path(const wchar_t *path) {
 
 typedef struct {
     const wchar_t *rpf_path;
+    YtdFile *parent;
     int sequence;
+    int discovered;
     int loaded;
+    int unavailable;
 } RpfImportContext;
 
 static const wchar_t *embedded_file_name(const wchar_t *path) {
@@ -733,7 +741,14 @@ static bool import_rpf_entry(const wchar_t *entry_path, const uint8_t *data,
 
     YtdFile *archive = load_archive_path(temp_path);
     DeleteFileW(temp_path);
-    if (!archive) return false;
+    ctx->discovered++;
+    if (!archive) {
+        archive = (YtdFile *)calloc(1, sizeof(YtdFile));
+        if (!archive) return false;
+        ctx->unavailable++;
+    } else {
+        ctx->loaded++;
+    }
 
     const wchar_t *leaf = embedded_file_name(entry_path);
     WideCharToMultiByte(CP_UTF8, 0, leaf, -1, archive->name, EO_MAX_NAME, NULL, NULL);
@@ -741,10 +756,10 @@ static bool import_rpf_entry(const wchar_t *entry_path, const uint8_t *data,
     archive->file_path[EO_MAX_PATH - 1] = 0;
     archive->type = ARCHIVE_MODEL_READONLY;
     archive->from_rpf = true;
-    archive->expanded = true;
+    archive->rpf_parent = ctx->parent;
+    archive->expanded = false;
     g_app.ytds[g_app.ytd_count++] = archive;
-    ctx->loaded++;
-    LOG("RPF import: loaded embedded %ls from %ls", entry_path, ctx->rpf_path);
+    LOG("RPF import: listed embedded %ls from %ls", entry_path, ctx->rpf_path);
     return true;
 }
 
@@ -758,16 +773,44 @@ void gui_add_ytd(const wchar_t *path) {
 
     const wchar_t *ext = wcsrchr(path, L'.');
     if (ext && _wcsicmp(ext, L".rpf") == 0) {
-        RpfImportContext context = {path, 0, 0};
+        YtdFile *group = (YtdFile *)calloc(1, sizeof(YtdFile));
+        if (!group) {
+            gui_update_status("Out of memory creating RPF group");
+            return;
+        }
+        const wchar_t *leaf = embedded_file_name(path);
+        WideCharToMultiByte(CP_UTF8, 0, leaf, -1, group->name, EO_MAX_NAME, NULL, NULL);
+        wcsncpy(group->file_path, path, EO_MAX_PATH - 1);
+        group->is_rpf_group = true;
+        group->expanded = false;
+        g_app.ytds[g_app.ytd_count++] = group;
+
+        RpfImportContext context = {path, group, 0, 0, 0};
         char error[256] = {0};
         int result = rpf_scan_file(path, import_rpf_entry, &context, error, sizeof(error));
         if (result < 0) {
+            for (int i = g_app.ytd_count - 1; i >= 0; i--) {
+                if (g_app.ytds[i]->rpf_parent != group) continue;
+                ytd_free(g_app.ytds[i]);
+                for (int j = i; j < g_app.ytd_count - 1; j++)
+                    g_app.ytds[j] = g_app.ytds[j + 1];
+                g_app.ytd_count--;
+            }
+            for (int i = 0; i < g_app.ytd_count; i++) {
+                if (g_app.ytds[i] != group) continue;
+                for (int j = i; j < g_app.ytd_count - 1; j++)
+                    g_app.ytds[j] = g_app.ytds[j + 1];
+                g_app.ytd_count--;
+                break;
+            }
+            ytd_free(group);
             LOG_ERR("RPF scan failed: %s", error);
             gui_update_status("RPF scan failed: %s", error);
             return;
         }
-        apply_archive_sort();
-        gui_update_status("RPF scan: %d texture archives loaded as read-only", context.loaded);
+        group->rpf_child_count = context.discovered;
+        gui_update_status("RPF scan: %d files listed, %d opened, %d unavailable; expand '%s'",
+            context.discovered, context.loaded, context.unavailable, group->name);
         InvalidateRect(g_app.hwnd_content, NULL, TRUE);
         InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
         return;
@@ -840,6 +883,7 @@ static int save_archives_to_folder(const wchar_t *folder, int *out_skipped) {
     int skipped = 0;
     for (int i = 0; i < g_app.ytd_count; i++) {
         YtdFile *archive = g_app.ytds[i];
+        if (archive->is_rpf_group) continue;
         if (archive->is_preview) continue;   /* uncommitted migration preview */
         const wchar_t *filename = PathFindFileNameW(archive->file_path);
         wchar_t output[MAX_PATH];
@@ -968,6 +1012,7 @@ static void save_all(void) {
     } else {
         for (int i = 0; i < g_app.ytd_count; i++) {
             YtdFile *archive = g_app.ytds[i];
+            if (archive->is_rpf_group) continue;
             if (archive->is_preview) continue;   /* uncommitted migration preview */
             if (archive->type == ARCHIVE_MODEL_READONLY) {
                 skipped++;
@@ -1693,53 +1738,70 @@ static void choose_recompress_mode(void) {
         do_same_format_recompress();
 }
 
+static bool texture_matches_search(TextureEntry *tex) {
+    if (!g_app.search_filter[0]) return true;
+    char lower_name[EO_MAX_NAME], lower_filter[256];
+    strncpy(lower_name, tex->name, EO_MAX_NAME);
+    lower_name[EO_MAX_NAME - 1] = 0;
+    _strlwr_s(lower_name, EO_MAX_NAME);
+    strncpy(lower_filter, g_app.search_filter, 256);
+    lower_filter[255] = 0;
+    _strlwr_s(lower_filter, 256);
+    return strstr(lower_name, lower_filter) != NULL;
+}
+
+static bool hit_test_texture_grid(YtdFile *ytd, int ytd_idx, int mx, int my,
+                                  int cards_per_row, int *io_y, int *out_ytd,
+                                  int *out_tex, int *out_cx, int *out_cy) {
+    int col = 0;
+    for (int t = 0; t < ytd->texture_count; t++) {
+        TextureEntry *tex = &ytd->textures[t];
+        if (!texture_matches_search(tex)) continue;
+        int cx = 12 + col * (CARD_W + CARD_MARGIN);
+        int cy = *io_y;
+        if (mx >= cx && mx < cx + CARD_W && my >= cy && my < cy + CARD_H) {
+            if (out_ytd) *out_ytd = ytd_idx;
+            if (out_tex) *out_tex = t;
+            if (out_cx) *out_cx = cx;
+            if (out_cy) *out_cy = cy;
+            return true;
+        }
+        if (++col >= cards_per_row) {
+            col = 0;
+            *io_y += CARD_H + CARD_MARGIN;
+        }
+    }
+    if (col > 0) *io_y += CARD_H + CARD_MARGIN;
+    *io_y += 8;
+    return false;
+}
+
 static bool hit_test_texture(int mx, int my, int *out_ytd, int *out_tex, int *out_cx, int *out_cy) {
     RECT crc;
     GetClientRect(g_app.hwnd_content, &crc);
-    int area_w = crc.right;
-    int content_w = area_w - 24;
-    int cards_per_row = (content_w + CARD_MARGIN) / (CARD_W + CARD_MARGIN);
+    int cards_per_row = ((crc.right - 24) + CARD_MARGIN) / (CARD_W + CARD_MARGIN);
     if (cards_per_row < 1) cards_per_row = 1;
 
     int y = 8;
     for (int i = 0; i < g_app.ytd_count; i++) {
         YtdFile *ytd = g_app.ytds[i];
-        y += FOLDER_H + 4; /* skip folder card */
-
+        if (ytd->from_rpf) continue;
+        y += FOLDER_H + 4;
         if (!ytd->expanded) continue;
-
-        int col = 0;
-        for (int t = 0; t < ytd->texture_count; t++) {
-            TextureEntry *tex = &ytd->textures[t];
-
-            /* Search filter */
-            if (g_app.search_filter[0]) {
-                char lower_name[EO_MAX_NAME];
-                strncpy(lower_name, tex->name, EO_MAX_NAME);
-                _strlwr_s(lower_name, EO_MAX_NAME);
-                char lower_filter[256];
-                strncpy(lower_filter, g_app.search_filter, 256);
-                _strlwr_s(lower_filter, 256);
-                if (!strstr(lower_name, lower_filter)) continue;
+        if (ytd->is_rpf_group) {
+            for (int c = 0; c < g_app.ytd_count; c++) {
+                YtdFile *child = g_app.ytds[c];
+                if (child->rpf_parent != ytd) continue;
+                y += RPF_ENTRY_H + 4;
+                if (child->expanded &&
+                    hit_test_texture_grid(child, c, mx, my, cards_per_row, &y,
+                                          out_ytd, out_tex, out_cx, out_cy))
+                    return true;
             }
-
-            int cx = 12 + col * (CARD_W + CARD_MARGIN);
-            int cy = y;
-            if (mx >= cx && mx < cx + CARD_W && my >= cy && my < cy + CARD_H) {
-                if (out_ytd) *out_ytd = i;
-                if (out_tex) *out_tex = t;
-                if (out_cx) *out_cx = cx;
-                if (out_cy) *out_cy = cy;
-                return true;
-            }
-            col++;
-            if (col >= cards_per_row) {
-                col = 0;
-                y += CARD_H + CARD_MARGIN;
-            }
+        } else if (hit_test_texture_grid(ytd, i, mx, my, cards_per_row, &y,
+                                         out_ytd, out_tex, out_cx, out_cy)) {
+            return true;
         }
-        if (col > 0) y += CARD_H + CARD_MARGIN;
-        y += 8;
     }
     return false;
 }
@@ -1968,18 +2030,73 @@ static void unload_rpf_archive(int ytd_idx) {
         return;
 
     char name[EO_MAX_NAME];
+    YtdFile *parent = g_app.ytds[ytd_idx]->rpf_parent;
     strncpy(name, g_app.ytds[ytd_idx]->name, EO_MAX_NAME);
     name[EO_MAX_NAME - 1] = 0;
     ytd_free(g_app.ytds[ytd_idx]);
     for (int i = ytd_idx; i < g_app.ytd_count - 1; i++)
         g_app.ytds[i] = g_app.ytds[i + 1];
     g_app.ytd_count--;
+    if (parent && parent->rpf_child_count > 0) parent->rpf_child_count--;
     gui_update_status("Unloaded '%s' from the application; original RPF was not changed", name);
     InvalidateRect(g_app.hwnd_content, NULL, TRUE);
     InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
 }
 
 /* ── Content painting ──────────────────────────────────────────────── */
+
+static int texture_grid_height(YtdFile *ytd, int area_w) {
+    int cards_per_row = ((area_w - 24) + CARD_MARGIN) / (CARD_W + CARD_MARGIN);
+    if (cards_per_row < 1) cards_per_row = 1;
+    int visible = 0;
+    for (int i = 0; i < ytd->texture_count; i++)
+        if (texture_matches_search(&ytd->textures[i])) visible++;
+    return ((visible + cards_per_row - 1) / cards_per_row) * (CARD_H + CARD_MARGIN) + 8;
+}
+
+static bool handle_archive_header_click(HWND hwnd, int mx, int my, int y,
+                                        int area_w, int ytd_idx) {
+    YtdFile *ytd = g_app.ytds[ytd_idx];
+    if (my < y || my >= y + FOLDER_H) return false;
+    if (ytd->is_preview) {
+        int card_w = area_w - 16;
+        int bl = 8 + card_w - 130, br = 8 + card_w - 44;
+        if (mx >= bl && mx <= br && my >= y + 16 && my <= y + 40) {
+            ytd->keep_originals = !ytd->keep_originals;
+            gui_update_status("%s: %s originals on migrate",
+                ytd->name, ytd->keep_originals ? "keeping" : "removing");
+            InvalidateRect(hwnd, NULL, TRUE);
+            return true;
+        }
+    } else if (ytd->from_rpf) {
+        int br = area_w - 52, bl = br - 72;
+        if (mx >= bl && mx <= br && my >= y + 16 && my <= y + 40) {
+            unload_rpf_archive(ytd_idx);
+            return true;
+        }
+    }
+    ytd->expanded = !ytd->expanded;
+    InvalidateRect(hwnd, NULL, TRUE);
+    return true;
+}
+
+static void paint_texture_grid(HDC hdc, RECT *viewport, YtdFile *ytd,
+                               int cards_per_row, int *io_y) {
+    int col = 0;
+    for (int t = 0; t < ytd->texture_count; t++) {
+        TextureEntry *tex = &ytd->textures[t];
+        if (!texture_matches_search(tex)) continue;
+        int x = 12 + col * (CARD_W + CARD_MARGIN);
+        if (*io_y + CARD_H >= 0 && *io_y <= viewport->bottom)
+            gui_draw_texture_card(hdc, x, *io_y, CARD_W, CARD_H, tex, ytd, false);
+        if (++col >= cards_per_row) {
+            col = 0;
+            *io_y += CARD_H + CARD_MARGIN;
+        }
+    }
+    if (col > 0) *io_y += CARD_H + CARD_MARGIN;
+    *io_y += 8;
+}
 
 static void paint_content(HWND hwnd, HDC hdc) {
     RECT rc;
@@ -2013,6 +2130,7 @@ static void paint_content(HWND hwnd, HDC hdc) {
 
     for (int i = 0; i < g_app.ytd_count; i++) {
         YtdFile *ytd = g_app.ytds[i];
+        if (ytd->from_rpf) continue;
 
         /* Folder card */
         if (y + FOLDER_H >= 0 && y <= rc.bottom) {
@@ -2022,34 +2140,19 @@ static void paint_content(HWND hwnd, HDC hdc) {
 
         if (!ytd->expanded) continue;
 
-        /* Texture cards */
-        int col = 0;
-        for (int t = 0; t < ytd->texture_count; t++) {
-            TextureEntry *tex = &ytd->textures[t];
-
-            /* Search filter */
-            if (g_app.search_filter[0]) {
-                char lower_name[EO_MAX_NAME];
-                strncpy(lower_name, tex->name, EO_MAX_NAME);
-                _strlwr_s(lower_name, EO_MAX_NAME);
-                char lower_filter[256];
-                strncpy(lower_filter, g_app.search_filter, 256);
-                _strlwr_s(lower_filter, 256);
-                if (!strstr(lower_name, lower_filter)) continue;
+        if (ytd->is_rpf_group) {
+            for (int c = 0; c < g_app.ytd_count; c++) {
+                YtdFile *child = g_app.ytds[c];
+                if (child->rpf_parent != ytd) continue;
+                if (y + RPF_ENTRY_H >= 0 && y <= rc.bottom)
+                    gui_draw_rpf_entry_row(hdc, 20, y, area_w - 28, child);
+                y += RPF_ENTRY_H + 4;
+                if (child->expanded)
+                    paint_texture_grid(hdc, &rc, child, cards_per_row, &y);
             }
-
-            int x = 12 + col * (CARD_W + CARD_MARGIN);
-            if (y + CARD_H >= 0 && y <= rc.bottom) {
-                gui_draw_texture_card(hdc, x, y, CARD_W, CARD_H, tex, ytd, false);
-            }
-            col++;
-            if (col >= cards_per_row) {
-                col = 0;
-                y += CARD_H + CARD_MARGIN;
-            }
+        } else {
+            paint_texture_grid(hdc, &rc, ytd, cards_per_row, &y);
         }
-        if (col > 0) y += CARD_H + CARD_MARGIN;
-        y += 8;
     }
 
     g_app.content_height = y + g_app.scroll_y;
@@ -2279,38 +2382,30 @@ static LRESULT CALLBACK ContentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         for (int i = 0; i < g_app.ytd_count; i++) {
             YtdFile *ytd = g_app.ytds[i];
-            if (my >= y && my < y + FOLDER_H) {
-                /* "Maintain" toggle on preview consolidated cards.
-                 * Card is drawn at x=8, w=area_w-16; button = {x+w-130 .. x+w-44, y+16..y+40}. */
-                if (ytd->is_preview) {
-                    int card_w = area_w - 16;
-                    int bl = 8 + card_w - 130, br2 = 8 + card_w - 44;
-                    if (mx >= bl && mx <= br2 && my >= y + 16 && my <= y + 40) {
-                        ytd->keep_originals = !ytd->keep_originals;
-                        gui_update_status("%s: %s originals on migrate",
-                            ytd->name, ytd->keep_originals ? "keeping" : "removing");
-                        InvalidateRect(hwnd, NULL, TRUE);
-                        return 0;
-                    }
-                } else if (ytd->from_rpf) {
-                    int card_w = area_w - 16;
-                    int bl = 8 + card_w - 116, br2 = 8 + card_w - 44;
-                    if (mx >= bl && mx <= br2 && my >= y + 16 && my <= y + 40) {
-                        unload_rpf_archive(i);
-                        return 0;
-                    }
-                }
-                ytd->expanded = !ytd->expanded;
-                InvalidateRect(hwnd, NULL, TRUE);
-                return 0;
-            }
+            if (ytd->from_rpf) continue;
+            if (handle_archive_header_click(hwnd, mx, my, y, area_w, i)) return 0;
             y += FOLDER_H + 4;
-            if (ytd->expanded) {
-                int cards_per_row = ((area_w - 24) + CARD_MARGIN) / (CARD_W + CARD_MARGIN);
-                if (cards_per_row < 1) cards_per_row = 1;
-                int visible = ytd->texture_count;
-                int rows = (visible + cards_per_row - 1) / cards_per_row;
-                y += rows * (CARD_H + CARD_MARGIN) + 8;
+            if (!ytd->expanded) continue;
+            if (ytd->is_rpf_group) {
+                for (int c = 0; c < g_app.ytd_count; c++) {
+                    YtdFile *child = g_app.ytds[c];
+                    if (child->rpf_parent != ytd) continue;
+                    if (my >= y && my < y + RPF_ENTRY_H) {
+                        int unload_left = area_w - 116, unload_right = area_w - 56;
+                        if (mx >= unload_left && mx <= unload_right &&
+                            my >= y + 9 && my <= y + 33) {
+                            unload_rpf_archive(c);
+                        } else {
+                            child->expanded = !child->expanded;
+                            InvalidateRect(hwnd, NULL, TRUE);
+                        }
+                        return 0;
+                    }
+                    y += RPF_ENTRY_H + 4;
+                    if (child->expanded) y += texture_grid_height(child, area_w);
+                }
+            } else {
+                y += texture_grid_height(ytd, area_w);
             }
         }
         return 0;
