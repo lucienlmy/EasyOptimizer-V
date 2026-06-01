@@ -223,10 +223,10 @@ uint8_t *tex_encode_bc(const uint8_t *rgba, int w, int h, TexFormat fmt, size_t 
         log_encoder_used("CPU (bc7enc ISPC)");
         return tex_encode_bc2(rgba, w, h, out_size);
     }
-    // NVTT 2 CUDA compressor only supports BC1 and BC3, and requires multiples of 4.
-    // For BC7 and other sizes, we must fallback to the fast CPU ISPC encoder to prevent crashes!
-    if (g_app.use_gpu_encoding && (fmt == TEX_FMT_BC1 || fmt == TEX_FMT_BC3) && (w % 4 == 0) && (h % 4 == 0)) {
-        NvttFormat nvttf = (fmt == TEX_FMT_BC1) ? NVTT_FORMAT_BC1 : NVTT_FORMAT_BC3;
+    // NVTT 3.2.5 handles BC1, BC3 and BC7, including edge blocks.
+    if (g_app.use_gpu_encoding && (fmt == TEX_FMT_BC1 || fmt == TEX_FMT_BC3 || fmt == TEX_FMT_BC7)) {
+        NvttFormat nvttf = (fmt == TEX_FMT_BC1) ? NVTT_FORMAT_BC1 :
+                           (fmt == TEX_FMT_BC3) ? NVTT_FORMAT_BC3 : NVTT_FORMAT_BC7;
 
         // NVTT wants BGRA; our `rgba` buffer is RGBA, so swap channels.
         uint8_t *bgra = malloc((size_t)w * h * 4);

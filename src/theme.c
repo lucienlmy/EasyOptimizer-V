@@ -63,3 +63,16 @@ COLORREF theme_size_color(double mib) {
     if (mib < 4.5)   return CLR_SIZE_RED;
     return CLR_SIZE_DRED;
 }
+
+/* Whole-archive color: a YTD is fine up to the 16 MiB streaming/green limit,
+ * so stay green through ~16 MiB, then warn as it grows past it. */
+COLORREF theme_archive_size_color(double mib) {
+    if (mib <= 12.0) return CLR_SIZE_GREEN;
+    if (mib <= 16.0) return CLR_SIZE_LGREEN;   /* at/under the limit: still OK */
+    if (mib <= 20.0) return CLR_SIZE_YELLOW;
+    if (mib <= 24.0) return CLR_SIZE_DYELLOW;
+    if (mib <= 32.0) return CLR_SIZE_ORANGE;
+    if (mib <= 48.0) return CLR_SIZE_DORANGE;
+    if (mib <  64.0) return CLR_SIZE_RED;
+    return CLR_SIZE_DRED;
+}

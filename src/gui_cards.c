@@ -52,10 +52,29 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd, bool hovered)
     else
         _snwprintf(info, 128, L"%d textures | %.2f MiB", ytd->texture_count, total_mib);
 
-    SetTextColor(hdc, theme_size_color(total_mib));
+    SetTextColor(hdc, theme_archive_size_color(total_mib));
     SelectObject(hdc, theme_font_small());
     RECT info_rc = {x + 60, y + 30, x + w - 40, y + 48};
     DrawTextW(hdc, info, -1, &info_rc, DT_LEFT | DT_SINGLELINE);
+
+    /* Preview consolidated YTDs get a "Maintain" toggle to keep originals. */
+    if (ytd->is_preview) {
+        RECT btn = {x + w - 130, y + 16, x + w - 44, y + 40};
+        bool on = ytd->keep_originals;
+        HBRUSH bfill = CreateSolidBrush(on ? RGB(0x16, 0xA3, 0x4A) : RGB(60, 60, 60));
+        HPEN bpen = CreatePen(PS_SOLID, 1, on ? RGB(0x4A, 0xDE, 0x80) : CLR_BORDER_DARK);
+        HPEN oldP = (HPEN)SelectObject(hdc, bpen);
+        HBRUSH oldB = (HBRUSH)SelectObject(hdc, bfill);
+        RoundRect(hdc, btn.left, btn.top, btn.right, btn.bottom, 6, 6);
+        SelectObject(hdc, oldP);
+        SelectObject(hdc, oldB);
+        DeleteObject(bpen);
+        DeleteObject(bfill);
+        SetTextColor(hdc, CLR_TEXT_PRIMARY);
+        SelectObject(hdc, theme_font_small_bold());
+        DrawTextW(hdc, on ? L"Keeping" : L"Maintain", -1, &btn,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
 
     /* Expand arrow */
     SetTextColor(hdc, CLR_TEXT_PRIMARY);

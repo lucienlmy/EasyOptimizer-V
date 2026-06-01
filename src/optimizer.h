@@ -31,8 +31,9 @@ typedef enum {
 /* A texture slated for removal from an original YTD on migration commit.
  * Stored by pointer so it survives list re-sorting between detect and migrate. */
 typedef struct {
-    YtdFile *ytd;
+    YtdFile *ytd;          /* original archive to remove the texture from */
     int tex_index;
+    YtdFile *consolidated; /* which preview consolidated this removal feeds */
 } PendingRemoval;
 
 /* Find duplicate textures across all loaded YTDs */

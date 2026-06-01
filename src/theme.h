@@ -36,5 +36,8 @@ HBRUSH   theme_brush_primary(void);
 
 void     theme_draw_rounded_rect(HDC hdc, RECT *rc, int radius, HBRUSH fill, HPEN border);
 COLORREF theme_size_color(double mib);
+/* Color for a whole archive's size: green up to the ~16 MiB streaming limit,
+ * then escalating to red as it exceeds it. */
+COLORREF theme_archive_size_color(double mib);
 
 #endif

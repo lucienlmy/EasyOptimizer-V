@@ -37,6 +37,7 @@ DupGroup *optimizer_find_duplicates(YtdFile **ytds, int ytd_count, int *out_grou
 
     typedef struct { char key[97]; int ytd_idx; int tex_idx; } Item;
     Item *items = (Item *)calloc(total, sizeof(Item));
+    if (!items) { *out_group_count = 0; return NULL; }
     int item_count = 0;
 
     for (int y = 0; y < ytd_count; y++) {
@@ -76,6 +77,7 @@ DupGroup *optimizer_find_duplicates(YtdFile **ytds, int ytd_count, int *out_grou
 
     int max_groups = item_count;
     DupGroup *groups = (DupGroup *)calloc(max_groups, sizeof(DupGroup));
+    if (!groups) { free(items); *out_group_count = 0; return NULL; }
     int group_count = 0;
 
     for (int i = 0; i < item_count; i++) {
@@ -83,7 +85,14 @@ DupGroup *optimizer_find_duplicates(YtdFile **ytds, int ytd_count, int *out_grou
         for (int g = 0; g < group_count; g++) {
             if (strcmp(groups[g].hash_key, items[i].key) == 0) {
                 int c = groups[g].count;
-                groups[g].entries = (DupEntry *)realloc(groups[g].entries, (c + 1) * sizeof(DupEntry));
+                DupEntry *grown = (DupEntry *)realloc(groups[g].entries, (c + 1) * sizeof(DupEntry));
+                if (!grown) {
+                    free(items);
+                    optimizer_free_groups(groups, group_count);
+                    *out_group_count = 0;
+                    return NULL;
+                }
+                groups[g].entries = grown;
                 groups[g].entries[c].ytd_index = items[i].ytd_idx;
                 groups[g].entries[c].tex_index = items[i].tex_idx;
                 groups[g].count++;
@@ -94,6 +103,12 @@ DupGroup *optimizer_find_duplicates(YtdFile **ytds, int ytd_count, int *out_grou
         if (!found) {
             strncpy(groups[group_count].hash_key, items[i].key, 96);
             groups[group_count].entries = (DupEntry *)malloc(sizeof(DupEntry));
+            if (!groups[group_count].entries) {
+                free(items);
+                optimizer_free_groups(groups, group_count);
+                *out_group_count = 0;
+                return NULL;
+            }
             groups[group_count].entries[0].ytd_index = items[i].ytd_idx;
             groups[group_count].entries[0].tex_index = items[i].tex_idx;
             groups[group_count].count = 1;
@@ -300,7 +315,7 @@ int optimizer_build_consolidation(YtdFile **io_ytds, int *io_ytd_count, int max_
             if (!grow_) goto done_groups; \
             rem = grow_; rem_cap *= 2; \
         } \
-        rem[rem_n].ytd = (ytd_); rem[rem_n].tex_index = (tex_); rem_n++; moved++; \
+        rem[rem_n].ytd = (ytd_); rem[rem_n].tex_index = (tex_); rem[rem_n].consolidated = cur_consol; rem_n++; moved++; \
     } while (0)
 
     for (int g = 0; g < group_count; g++) {
@@ -371,6 +386,9 @@ void optimizer_apply_removals(PendingRemoval *removals, int count) {
             if (swap) { PendingRemoval tmp = removals[i]; removals[i] = removals[j]; removals[j] = tmp; }
         }
     }
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < count; i++) {
+        /* Skip removals whose consolidated was flagged "Maintain originals". */
+        if (removals[i].consolidated && removals[i].consolidated->keep_originals) continue;
         archive_remove_texture(removals[i].ytd, removals[i].tex_index);
+    }
 }

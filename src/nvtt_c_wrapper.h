@@ -6,26 +6,21 @@
 extern "C" {
 #endif
 
-// Texture format (from NVTT 2)
+// Texture format values from NVTT 3.2.5's NvttFormat enum.
 typedef enum {
     NVTT_FORMAT_BC1 = 1,
     NVTT_FORMAT_BC3 = 4,
-    NVTT_FORMAT_BC7 = 11,
+    NVTT_FORMAT_BC7 = 15,
 } NvttFormat;
 
-// Input format (from NVTT 2)
-typedef enum {
-    NVTT_INPUT_FORMAT_BGRA_8UB = 0,
-} NvttInputFormat;
-
-// Initialize the NVTT wrapper (loads nvtt.dll)
+// Initialize the NVTT wrapper (loads nvtt30205.dll)
 bool nvtt_wrapper_init(void);
 
-// True if nvtt.dll is loaded and ready (does not attempt a load on its own
+// True if nvtt30205.dll is loaded and ready (does not attempt a load on its own
 // after a previous failure was cached).
 bool nvtt_is_available(void);
 
-// Lightweight startup probe: tries to load nvtt.dll and verify the C API is
+// Lightweight startup probe: tries to load nvtt30205.dll and verify the C API is
 // present, logging the result, then unloads. Does NOT initialize CUDA.
 void nvtt_wrapper_probe(void);
 

@@ -37,6 +37,8 @@ if %errorlevel% neq 0 (
 )
 
 if not exist "build" mkdir build
+if exist "nvtt30205.dll" copy /Y "nvtt30205.dll" "build\nvtt30205.dll" >nul
+if exist "vcomp140.dll" copy /Y "vcomp140.dll" "build\vcomp140.dll" >nul
 
 set COMMON=/nologo /O2 /W3 /MD /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS
 set CFLAGS=%COMMON% /I vendor\bc7enc_rdo

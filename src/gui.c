@@ -39,10 +39,16 @@ AppState g_app = {0};
 #define ID_SIDEBAR_LANGUAGE   1009
 #define ID_SIDEBAR_SORT       1011
 #define ID_SIDEBAR_MIGRATE    1013
+#define ID_SIDEBAR_SAMEFORMAT 1014
 
 #define IDC_DET_CRITERION 3030
 #define IDC_MIG_CRITERION 3031
 #define IDC_MIG_STRATEGY  3032
+#define IDC_IMPORT_YTD    3040
+#define IDC_IMPORT_YFT    3041
+#define IDC_IMPORT_YDD    3042
+#define IDC_IMPORT_YDR    3043
+#define IDC_IMPORT_WTD    3044
 
 #define IDC_RES_MAXW 3011
 #define IDC_RES_MAXH 3012
@@ -104,13 +110,15 @@ static void paint_sidebar(HWND hwnd, HDC hdc);
 static void paint_header(HWND hwnd, HDC hdc);
 static bool hit_test_texture(int mx, int my, int *out_ytd, int *out_tex, int *out_cx, int *out_cy);
 static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int ytd_idx, int tex_idx);
-static void do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, TexFormat fmt, int max_mips);
+static bool do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, TexFormat fmt, int max_mips);
 static void do_fast_recompress(void);
+static void do_same_format_recompress(void);
 static void do_custom_resize(int ytd_idx, int tex_idx);
 static void do_texture_export_dds(int ytd_idx, int tex_idx);
 static void do_texture_remove(int ytd_idx, int tex_idx);
 static void select_language(void);
 static void apply_archive_sort(void);
+static bool select_import_types(HWND parent);
 
 /* ── Sidebar button struct ─────────────────────────────────────────── */
 
@@ -131,6 +139,7 @@ static SidebarButton g_sidebar_btns[] = {
     {{0}, ID_SIDEBAR_MIGRATE,    L"Migrate Dups",      false, false},  /* shown only after detect */
     {{0}, ID_SIDEBAR_OPTIMIZE,   L"Smart Optimize", false, true},
     {{0}, ID_SIDEBAR_FASTRECOMP, L"Fast Recompress",false, true},
+    {{0}, ID_SIDEBAR_SAMEFORMAT, L"Recompress Same Format", false, true},
     {{0}, ID_SIDEBAR_TOGGLE_ENC, L"Encoder: CPU",   false, true},
     {{0}, ID_SIDEBAR_LANGUAGE,   L"Language: English", false, true},
     {{0}, ID_SIDEBAR_SORT,       L"Sort: Name", false, true},
@@ -168,6 +177,16 @@ typedef enum {
 static ArchiveSortMode g_sort_mode = SORT_BY_NAME;
 static int g_scan_candidates = 0;
 static int g_scan_failed = 0;
+
+typedef struct {
+    bool ytd;
+    bool yft;
+    bool ydd;
+    bool ydr;
+    bool wtd;
+} ImportFilter;
+
+static ImportFilter g_import_filter = {true, true, true, true, true};
 
 /* Pending migration preview (built by Detect, committed by Migrate Dups) */
 static PendingRemoval *g_pending_removals = NULL;
@@ -222,6 +241,16 @@ static bool is_supported_archive_path(const wchar_t *path) {
     return _wcsicmp(ext, L".ytd") == 0 || _wcsicmp(ext, L".wtd") == 0 ||
            _wcsicmp(ext, L".ydr") == 0 || _wcsicmp(ext, L".yft") == 0 ||
            _wcsicmp(ext, L".ydd") == 0;
+}
+
+static bool should_import_archive_path(const wchar_t *path) {
+    const wchar_t *ext = PathFindExtensionW(path);
+    if (_wcsicmp(ext, L".ytd") == 0) return g_import_filter.ytd;
+    if (_wcsicmp(ext, L".yft") == 0) return g_import_filter.yft;
+    if (_wcsicmp(ext, L".ydd") == 0) return g_import_filter.ydd;
+    if (_wcsicmp(ext, L".ydr") == 0) return g_import_filter.ydr;
+    if (_wcsicmp(ext, L".wtd") == 0) return g_import_filter.wtd;
+    return false;
 }
 
 static const wchar_t *trw(const wchar_t *en, const wchar_t *pt,
@@ -285,7 +314,9 @@ static void update_sidebar_labels(void) {
     g_sidebar_btns[5].text = trw9(L"Migrate Dups", L"Migrar duplicadas", L"Migrar duplicados", L"Перенести дубликаты", L"Yinelenenleri taşı", L"迁移重复项", L"डुप्लिकेट स्थानांतरण", L"重複を移行", L"نقل التكرارات");
     g_sidebar_btns[6].text = trw9(L"Smart Optimize", L"Otimização inteligente", L"Optimización inteligente", L"Умная оптимизация", L"Akıllı optimize", L"智能优化", L"स्मार्ट अनुकूलन", L"スマート最適化", L"تحسين ذكي");
     g_sidebar_btns[7].text = trw9(L"Fast Recompress", L"Recompressão rápida", L"Recompresión rápida", L"Быстрое сжатие", L"Hızlı sıkıştır", L"快速重新压缩", L"तेज़ पुनःसंपीड़न", L"高速再圧縮", L"إعادة ضغط سريعة");
-    g_sidebar_btns[8].text = g_app.use_gpu_encoding
+    g_sidebar_btns[8].text = trw(L"Recompress Same Format", L"Recomprimir mesmo formato",
+        L"Recomprimir mismo formato", L"Сжать в том же формате");
+    g_sidebar_btns[9].text = g_app.use_gpu_encoding
         ? trw(L"Encoder: GPU", L"Encoder: GPU", L"Codificador: GPU", L"Кодировщик: GPU")
         : trw(L"Encoder: CPU", L"Encoder: CPU", L"Codificador: CPU", L"Кодировщик: CPU");
     if (g_language == UI_LANG_BENGALI) {
@@ -307,13 +338,13 @@ static void update_sidebar_labels(void) {
         g_sidebar_btns[0].text = L"Aggiungi file"; g_sidebar_btns[1].text = L"Aggiungi cartella";
         g_sidebar_btns[2].text = L"Salva tutto"; g_sidebar_btns[3].text = L"Cancella tutto";
     }
-    g_sidebar_btns[9].text = language_button_text();
+    g_sidebar_btns[10].text = language_button_text();
     switch (g_sort_mode) {
-        case SORT_BY_TYPE: g_sidebar_btns[10].text = trw8(L"Sort: Type", L"Ordenar: Tipo", L"Ordenar: Tipo", L"Сорт.: Тип", L"Sırala: Tür", L"排序: 类型", L"क्रम: प्रकार", L"並べ替え: 種類"); break;
-        case SORT_BY_SIZE: g_sidebar_btns[10].text = trw8(L"Sort: Size", L"Ordenar: Tamanho", L"Ordenar: Tamaño", L"Сорт.: Размер", L"Sırala: Boyut", L"排序: 大小", L"क्रम: आकार", L"並べ替え: サイズ"); break;
-        case SORT_BY_TEXTURE_COUNT: g_sidebar_btns[10].text = trw8(L"Sort: Textures", L"Ordenar: Texturas", L"Ordenar: Texturas", L"Сорт.: Текстуры", L"Sırala: Dokular", L"排序: 纹理数", L"क्रम: टेक्सचर", L"並べ替え: テクスチャ"); break;
-        case SORT_BY_MODIFIED: g_sidebar_btns[10].text = trw8(L"Sort: Modified", L"Ordenar: Modificados", L"Ordenar: Modificados", L"Сорт.: Изменены", L"Sırala: Değişen", L"排序: 已修改", L"क्रम: संशोधित", L"並べ替え: 更新"); break;
-        default: g_sidebar_btns[10].text = trw8(L"Sort: Name", L"Ordenar: Nome", L"Ordenar: Nombre", L"Сорт.: Имя", L"Sırala: Ad", L"排序: 名称", L"क्रम: नाम", L"並べ替え: 名前"); break;
+        case SORT_BY_TYPE: g_sidebar_btns[11].text = trw8(L"Sort: Type", L"Ordenar: Tipo", L"Ordenar: Tipo", L"Сорт.: Тип", L"Sırala: Tür", L"排序: 类型", L"क्रम: प्रकार", L"並べ替え: 種類"); break;
+        case SORT_BY_SIZE: g_sidebar_btns[11].text = trw8(L"Sort: Size", L"Ordenar: Tamanho", L"Ordenar: Tamaño", L"Сорт.: Размер", L"Sırala: Boyut", L"排序: 大小", L"क्रम: आकार", L"並べ替え: サイズ"); break;
+        case SORT_BY_TEXTURE_COUNT: g_sidebar_btns[11].text = trw8(L"Sort: Textures", L"Ordenar: Texturas", L"Ordenar: Texturas", L"Сорт.: Текстуры", L"Sırala: Dokular", L"排序: 纹理数", L"क्रम: टेक्सचर", L"並べ替え: テクスチャ"); break;
+        case SORT_BY_MODIFIED: g_sidebar_btns[11].text = trw8(L"Sort: Modified", L"Ordenar: Modificados", L"Ordenar: Modificados", L"Сорт.: Изменены", L"Sırala: Değişen", L"排序: 已修改", L"क्रम: संशोधित", L"並べ替え: 更新"); break;
+        default: g_sidebar_btns[11].text = trw8(L"Sort: Name", L"Ordenar: Nome", L"Ordenar: Nombre", L"Сорт.: Имя", L"Sırala: Ad", L"排序: 名称", L"क्रम: नाम", L"並べ替え: 名前"); break;
     }
 }
 
@@ -449,7 +480,93 @@ void gui_update_status(const char *fmt, ...) {
 
 /* ── File open dialog ──────────────────────────────────────────────── */
 
+static INT_PTR CALLBACK ImportTypesDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    ImportFilter *filter = (ImportFilter *)GetWindowLongPtrW(hDlg, DWLP_USER);
+    switch (msg) {
+    case WM_INITDIALOG:
+        SetWindowLongPtrW(hDlg, DWLP_USER, lp);
+        filter = (ImportFilter *)lp;
+        CheckDlgButton(hDlg, IDC_IMPORT_YTD, filter->ytd ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_IMPORT_YFT, filter->yft ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_IMPORT_YDD, filter->ydd ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_IMPORT_YDR, filter->ydr ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_IMPORT_WTD, filter->wtd ? BST_CHECKED : BST_UNCHECKED);
+        return TRUE;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK) {
+            filter->ytd = IsDlgButtonChecked(hDlg, IDC_IMPORT_YTD) == BST_CHECKED;
+            filter->yft = IsDlgButtonChecked(hDlg, IDC_IMPORT_YFT) == BST_CHECKED;
+            filter->ydd = IsDlgButtonChecked(hDlg, IDC_IMPORT_YDD) == BST_CHECKED;
+            filter->ydr = IsDlgButtonChecked(hDlg, IDC_IMPORT_YDR) == BST_CHECKED;
+            filter->wtd = IsDlgButtonChecked(hDlg, IDC_IMPORT_WTD) == BST_CHECKED;
+            EndDialog(hDlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) { EndDialog(hDlg, IDCANCEL); return TRUE; }
+        break;
+    case WM_CLOSE:
+        EndDialog(hDlg, IDCANCEL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static LPDLGTEMPLATE build_import_types_template(void) {
+    uint8_t *buf = (uint8_t *)calloc(1, 4096);
+    uint8_t *p = buf;
+    if (!buf) return NULL;
+
+    DLGTEMPLATE *dt = (DLGTEMPLATE *)p;
+    dt->style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    dt->dwExtendedStyle = 0;
+    dt->cdit = 7;
+    dt->x = 0; dt->y = 0; dt->cx = 180; dt->cy = 118;
+    p += sizeof(DLGTEMPLATE);
+    *(WORD *)p = 0; p += 2;
+    *(WORD *)p = 0; p += 2;
+    const wchar_t *title = L"Import file types";
+    size_t tlen = (wcslen(title) + 1) * 2;
+    memcpy(p, title, tlen); p += tlen;
+
+    #define ADD_IMPORT_ITEM(style_, x_, y_, cx_, cy_, id_, cls_atom_, text_) do { \
+        p = (uint8_t *)(((uintptr_t)p + 3) & ~3); \
+        DLGITEMTEMPLATE *it = (DLGITEMTEMPLATE *)p; \
+        it->style = (style_) | WS_CHILD | WS_VISIBLE; \
+        it->dwExtendedStyle = 0; \
+        it->x = x_; it->y = y_; it->cx = cx_; it->cy = cy_; it->id = id_; \
+        p += sizeof(DLGITEMTEMPLATE); \
+        *(WORD *)p = 0xFFFF; p += 2; *(WORD *)p = cls_atom_; p += 2; \
+        size_t slen = (wcslen(text_) + 1) * 2; \
+        memcpy(p, text_, slen); p += slen; *(WORD *)p = 0; p += 2; \
+    } while (0)
+
+    ADD_IMPORT_ITEM(BS_AUTOCHECKBOX | WS_TABSTOP, 12, 12, 70, 12, IDC_IMPORT_YTD, 0x0080, L"YTD");
+    ADD_IMPORT_ITEM(BS_AUTOCHECKBOX | WS_TABSTOP, 92, 12, 70, 12, IDC_IMPORT_WTD, 0x0080, L"WTD");
+    ADD_IMPORT_ITEM(BS_AUTOCHECKBOX | WS_TABSTOP, 12, 34, 70, 12, IDC_IMPORT_YFT, 0x0080, L"YFT");
+    ADD_IMPORT_ITEM(BS_AUTOCHECKBOX | WS_TABSTOP, 92, 34, 70, 12, IDC_IMPORT_YDD, 0x0080, L"YDD");
+    ADD_IMPORT_ITEM(BS_AUTOCHECKBOX | WS_TABSTOP, 12, 56, 70, 12, IDC_IMPORT_YDR, 0x0080, L"YDR");
+    ADD_IMPORT_ITEM(BS_DEFPUSHBUTTON | WS_TABSTOP, 32, 88, 52, 16, IDOK, 0x0080, L"Continue");
+    ADD_IMPORT_ITEM(BS_PUSHBUTTON | WS_TABSTOP, 96, 88, 52, 16, IDCANCEL, 0x0080, L"Cancel");
+
+    #undef ADD_IMPORT_ITEM
+    return (LPDLGTEMPLATE)buf;
+}
+
+static bool select_import_types(HWND parent) {
+    LPDLGTEMPLATE tpl = build_import_types_template();
+    if (!tpl) return false;
+    ImportFilter selected = g_import_filter;
+    INT_PTR result = DialogBoxIndirectParamW(GetModuleHandleW(NULL), tpl, parent,
+        ImportTypesDlgProc, (LPARAM)&selected);
+    free(tpl);
+    if (result != IDOK) return false;
+    g_import_filter = selected;
+    return true;
+}
+
 static void open_file_dialog(HWND parent) {
+    if (!select_import_types(parent)) return;
+
     IFileOpenDialog *pfd = NULL;
     HRESULT hr = CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
                                   &IID_IFileOpenDialog, (void **)&pfd);
@@ -510,7 +627,7 @@ static void scan_folder_recursive(const wchar_t *dir) {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             scan_folder_recursive(full);
         } else {
-            if (is_supported_archive_path(fd.cFileName)) {
+            if (is_supported_archive_path(fd.cFileName) && should_import_archive_path(fd.cFileName)) {
                 int before = g_app.ytd_count;
                 g_scan_candidates++;
                 gui_add_ytd(full);
@@ -522,6 +639,8 @@ static void scan_folder_recursive(const wchar_t *dir) {
 }
 
 static void open_folder_dialog(HWND parent) {
+    if (!select_import_types(parent)) return;
+
     IFileOpenDialog *pfd = NULL;
     HRESULT hr = CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
                                   &IID_IFileOpenDialog, (void **)&pfd);
@@ -570,6 +689,7 @@ void gui_add_ytd(const wchar_t *path) {
         gui_update_status("Unsupported file type");
         return;
     }
+    if (!should_import_archive_path(path)) return;
 
     LOG("gui_add_ytd: adding file");
 
@@ -1413,6 +1533,54 @@ static void do_fast_recompress(void) {
 
 /* ── Texture hit testing ───────────────────────────────────────────── */
 
+static void do_same_format_recompress(void) {
+    if (g_app.ytd_count == 0) {
+        gui_update_status("No files loaded");
+        return;
+    }
+
+    int processed = 0, skipped = 0;
+    size_t size_before = 0, size_after = 0;
+    log_encoder_intent("Recompress Same Format");
+    gui_update_status("Recompressing with original formats...");
+
+    for (int i = 0; i < g_app.ytd_count; i++) {
+        YtdFile *ytd = g_app.ytds[i];
+        for (int t = 0; t < ytd->texture_count; t++) {
+            TextureEntry *te = &ytd->textures[t];
+            if (!tex_format_is_compressed(te->format) || !tex_format_can_encode(te->format) ||
+                te->width < 4 || te->height < 4) {
+                skipped++;
+                continue;
+            }
+
+            size_t old_size = te->data_size;
+            if (do_texture_resize(i, t, te->width, te->height, te->format, -2)) {
+                size_before += old_size;
+                size_after += te->data_size;
+                processed++;
+            } else {
+                skipped++;
+            }
+        }
+    }
+
+    double before_mib = size_before / (1024.0 * 1024.0);
+    double after_mib = size_after / (1024.0 * 1024.0);
+    wchar_t msg[512];
+    _snwprintf(msg, 512,
+        L"Same Format Recompress Complete\n\n"
+        L"Textures processed: %d\n"
+        L"Textures skipped: %d\n"
+        L"Before: %.2f MiB\n"
+        L"After: %.2f MiB\n\n"
+        L"Resolution, format and mip count were preserved.",
+        processed, skipped, before_mib, after_mib);
+    MessageBoxW(g_app.hwnd_main, msg, L"Recompress Same Format", MB_OK | MB_ICONINFORMATION);
+    gui_update_status("Same Format Recompress: %d processed, %d skipped", processed, skipped);
+    InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+}
+
 static bool hit_test_texture(int mx, int my, int *out_ytd, int *out_tex, int *out_cx, int *out_cy) {
     RECT crc;
     GetClientRect(g_app.hwnd_content, &crc);
@@ -1550,14 +1718,14 @@ static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int
 
 /* ── Texture actions ───────────────────────────────────────────────── */
 
-static void do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, TexFormat fmt, int max_mips) {
+static bool do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, TexFormat fmt, int max_mips) {
     YtdFile *ytd = g_app.ytds[ytd_idx];
     TextureEntry *te = &ytd->textures[tex_idx];
     TexFormat enc_fmt = (fmt == TEX_FMT_UNKNOWN) ? te->format : fmt;
     LOG("do_texture_resize: '%s' %dx%d -> %dx%d fmt=%d", te->name, te->width, te->height, new_w, new_h, fmt);
     if (!tex_format_can_encode(enc_fmt)) {
         gui_update_status("Cannot encode '%s' as %s", te->name, tex_format_name(enc_fmt));
-        return;
+        return false;
     }
 
     if (new_w < 4) new_w = 4;
@@ -1568,12 +1736,12 @@ static void do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, Te
     /* Decode to BGRA */
     int dec_w, dec_h;
     uint8_t *bgra = tex_decode_to_bgra(te, 0, &dec_w, &dec_h);
-    if (!bgra) { gui_update_status("Failed to decode texture"); return; }
+    if (!bgra) { gui_update_status("Failed to decode texture"); return false; }
 
     /* Convert BGRA → RGBA */
     size_t px_count = (size_t)dec_w * dec_h;
     uint8_t *rgba = (uint8_t *)malloc(px_count * 4);
-    if (!rgba) { free(bgra); gui_update_status("Out of memory decoding '%s'", te->name); return; }
+    if (!rgba) { free(bgra); gui_update_status("Out of memory decoding '%s'", te->name); return false; }
     for (size_t p = 0; p < px_count; p++) {
         rgba[p*4+0] = bgra[p*4+2];
         rgba[p*4+1] = bgra[p*4+1];
@@ -1587,7 +1755,7 @@ static void do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, Te
     if (new_w != dec_w || new_h != dec_h) {
         resized = bc7enc_resize_rgba(rgba, dec_w, dec_h, new_w, new_h, 5);
         free(rgba);
-        if (!resized) { gui_update_status("Failed to resize"); return; }
+        if (!resized) { gui_update_status("Failed to resize"); return false; }
     } else {
         resized = rgba;
     }
@@ -1598,7 +1766,7 @@ static void do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, Te
     uint8_t *new_data = tex_generate_mips(resized, new_w, new_h, enc_fmt,
                                            (max_mips == -2 ? te->mip_count : (max_mips == -1 ? 13 : max_mips)), &mip_count, &total_size);
     bc7enc_free(resized);
-    if (!new_data) { gui_update_status("Failed to encode"); return; }
+    if (!new_data) { gui_update_status("Failed to encode"); return false; }
 
     /* Replace texture data */
     free(te->data);
@@ -1613,6 +1781,7 @@ static void do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, Te
     LOG("  done: %dx%d %s, %zu bytes, %d mips", new_w, new_h, tex_format_name(enc_fmt), total_size, mip_count);
     gui_update_status("Resized '%s' to %dx%d (%s)", te->name, new_w, new_h, tex_format_name(enc_fmt));
     InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+    return true;
 }
 
 static void do_texture_export_dds(int ytd_idx, int tex_idx) {
@@ -1859,6 +2028,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HDROP hDrop = (HDROP)wp;
         int count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
         LOG("WM_DROPFILES: %d files", count);
+        if (!select_import_types(hwnd)) {
+            DragFinish(hDrop);
+            return 0;
+        }
         for (int i = 0; i < count; i++) {
             wchar_t path[MAX_PATH];
             DragQueryFileW(hDrop, i, path, MAX_PATH);
@@ -1979,6 +2152,19 @@ static LRESULT CALLBACK ContentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         for (int i = 0; i < g_app.ytd_count; i++) {
             YtdFile *ytd = g_app.ytds[i];
             if (my >= y && my < y + FOLDER_H) {
+                /* "Maintain" toggle on preview consolidated cards.
+                 * Card is drawn at x=8, w=area_w-16; button = {x+w-130 .. x+w-44, y+16..y+40}. */
+                if (ytd->is_preview) {
+                    int card_w = area_w - 16;
+                    int bl = 8 + card_w - 130, br2 = 8 + card_w - 44;
+                    if (mx >= bl && mx <= br2 && my >= y + 16 && my <= y + 40) {
+                        ytd->keep_originals = !ytd->keep_originals;
+                        gui_update_status("%s: %s originals on migrate",
+                            ytd->name, ytd->keep_originals ? "keeping" : "removing");
+                        InvalidateRect(hwnd, NULL, TRUE);
+                        return 0;
+                    }
+                }
                 ytd->expanded = !ytd->expanded;
                 InvalidateRect(hwnd, NULL, TRUE);
                 return 0;
@@ -2046,6 +2232,7 @@ static LRESULT CALLBACK SidebarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                     case ID_SIDEBAR_MIGRATE: do_migrate_duplicates(); break;
                     case ID_SIDEBAR_OPTIMIZE: do_smart_optimize(); break;
                     case ID_SIDEBAR_FASTRECOMP: do_fast_recompress(); break;
+                    case ID_SIDEBAR_SAMEFORMAT: do_same_format_recompress(); break;
                     case ID_SIDEBAR_ADDFOLDER:  open_folder_dialog(g_app.hwnd_main); break;
                     case ID_SIDEBAR_TOGGLE_ENC:
                         g_app.use_gpu_encoding = !g_app.use_gpu_encoding;
