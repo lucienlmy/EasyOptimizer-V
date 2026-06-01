@@ -1,0 +1,196 @@
+#include "gui.h"
+#include "theme.h"
+#include "texture.h"
+#include "image.h"
+#include <stdio.h>
+
+/* ── YTD Folder Card ───────────────────────────────────────────────── */
+
+void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd, bool hovered) {
+    RECT rc = {x, y, x + w, y + 56};
+
+    HBRUSH fill = CreateSolidBrush(hovered ? CLR_HOVER : CLR_SURFACE_DARK);
+    HPEN pen = CreatePen(PS_SOLID, 1, ytd->expanded ? CLR_PRIMARY : CLR_BORDER_DARK);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fill);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 12, 12);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(fill);
+
+    /* Folder icon (simple colored rectangle) */
+    COLORREF icon_clr = CLR_PRIMARY;
+    HBRUSH icon_brush = CreateSolidBrush(icon_clr);
+    RECT icon_rc = {x + 16, y + 18, x + 48, y + 44};
+    FillRect(hdc, &icon_rc, icon_brush);
+    RECT tab_rc = {x + 16, y + 12, x + 32, y + 20};
+    FillRect(hdc, &tab_rc, icon_brush);
+    DeleteObject(icon_brush);
+
+    /* Name */
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, CLR_TEXT_PRIMARY);
+    SelectObject(hdc, theme_font_title());
+
+    wchar_t wname[256];
+    MultiByteToWideChar(CP_UTF8, 0, ytd->name, -1, wname, 256);
+    RECT name_rc = {x + 60, y + 10, x + w - 40, y + 30};
+    DrawTextW(hdc, wname, -1, &name_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    /* Info line */
+    size_t total_size = 0;
+    for (int i = 0; i < ytd->texture_count; i++)
+        total_size += ytd->textures[i].data_size;
+    double total_mib = total_size / (1024.0 * 1024.0);
+
+    wchar_t info[128];
+    _snwprintf(info, 128, L"%d textures | %.2f MiB", ytd->texture_count, total_mib);
+
+    SetTextColor(hdc, theme_size_color(total_mib));
+    SelectObject(hdc, theme_font_small());
+    RECT info_rc = {x + 60, y + 30, x + w - 40, y + 48};
+    DrawTextW(hdc, info, -1, &info_rc, DT_LEFT | DT_SINGLELINE);
+
+    /* Expand arrow */
+    SetTextColor(hdc, CLR_TEXT_PRIMARY);
+    SelectObject(hdc, theme_font_title());
+    const wchar_t *arrow = ytd->expanded ? L"\x25BC" : L"\x25B6";
+    RECT arrow_rc = {x + w - 30, y + 16, x + w - 8, y + 40};
+    DrawTextW(hdc, arrow, -1, &arrow_rc, DT_CENTER | DT_SINGLELINE);
+}
+
+/* ── Texture Card ──────────────────────────────────────────────────── */
+
+void gui_draw_texture_card(HDC hdc, int x, int y, int card_w, int card_h,
+                           TextureEntry *tex, YtdFile *parent, bool hovered) {
+    RECT rc = {x, y, x + card_w, y + card_h};
+
+    /* Card background */
+    HBRUSH fill = CreateSolidBrush(CLR_SURFACE_DARK);
+    HPEN pen = CreatePen(PS_SOLID, 1, hovered ? CLR_PRIMARY : CLR_BORDER_DARK);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fill);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 12, 12);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(fill);
+
+    int footer_h = 80;
+    int img_h = card_h - footer_h;
+
+    /* Image area (black background) */
+    RECT img_rc = {x + 1, y + 1, x + card_w - 1, y + img_h};
+    HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(hdc, &img_rc, black);
+    DeleteObject(black);
+
+    /* Decode and draw texture preview */
+    int tw = 0, th = 0;
+    uint8_t *pixels = tex_decode_to_bgra(tex, 0, &tw, &th);
+    if (pixels && tw > 0 && th > 0) {
+        HBITMAP hbm = image_create_bitmap(pixels, tw, th);
+        if (hbm) {
+            HDC memDC = CreateCompatibleDC(hdc);
+            HBITMAP oldBM = (HBITMAP)SelectObject(memDC, hbm);
+
+            int avail_w = card_w - 2;
+            int avail_h = img_h - 2;
+            float ratio_w = (float)avail_w / tw;
+            float ratio_h = (float)avail_h / th;
+            float ratio = ratio_w < ratio_h ? ratio_w : ratio_h;
+            int dw = (int)(tw * ratio);
+            int dh = (int)(th * ratio);
+            int dx = x + 1 + (avail_w - dw) / 2;
+            int dy = y + 1 + (avail_h - dh) / 2;
+
+            SetStretchBltMode(hdc, HALFTONE);
+            StretchBlt(hdc, dx, dy, dw, dh, memDC, 0, 0, tw, th, SRCCOPY);
+
+            SelectObject(memDC, oldBM);
+            DeleteObject(hbm);
+            DeleteDC(memDC);
+        }
+        free(pixels);
+    }
+
+    /* Format badge */
+    SetBkMode(hdc, TRANSPARENT);
+    const char *fmt_str = tex_format_name(tex->format);
+    char short_fmt[64];
+    if (strncmp(fmt_str, "D3DFMT_", 7) == 0)
+        strncpy(short_fmt, fmt_str + 7, 64);
+    else
+        strncpy(short_fmt, fmt_str, 64);
+
+    wchar_t wfmt[64];
+    MultiByteToWideChar(CP_UTF8, 0, short_fmt, -1, wfmt, 64);
+
+    SelectObject(hdc, theme_font_mono());
+    SIZE fmtSize;
+    GetTextExtentPoint32W(hdc, wfmt, (int)wcslen(wfmt), &fmtSize);
+
+    RECT badge_rc = {x + card_w - fmtSize.cx - 16, y + 6,
+                     x + card_w - 6, y + 6 + fmtSize.cy + 4};
+    HBRUSH badge_bg = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(hdc, &badge_rc, badge_bg);
+    DeleteObject(badge_bg);
+    SetTextColor(hdc, CLR_TEXT_PRIMARY);
+    DrawTextW(hdc, wfmt, -1, &badge_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    /* Footer: name, size, dimensions, mips */
+    int text_y = y + img_h + 10;
+    int text_x = x + 12;
+
+    /* Name */
+    wchar_t wname[256];
+    MultiByteToWideChar(CP_UTF8, 0, tex->name, -1, wname, 256);
+    SetTextColor(hdc, CLR_TEXT_PRIMARY);
+    SelectObject(hdc, theme_font_title());
+    RECT name_rc = {text_x, text_y, x + card_w - 80, text_y + 20};
+    DrawTextW(hdc, wname, -1, &name_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    /* Size */
+    double mib = tex->data_size / (1024.0 * 1024.0);
+    wchar_t size_str[32];
+    _snwprintf(size_str, 32, L"%.2f MiB", mib);
+    SetTextColor(hdc, theme_size_color(mib));
+    SelectObject(hdc, theme_font_small_bold());
+    RECT size_rc = {x + card_w - 80, text_y, x + card_w - 10, text_y + 20};
+    DrawTextW(hdc, size_str, -1, &size_rc, DT_RIGHT | DT_SINGLELINE);
+
+    /* Meta info */
+    text_y += 22;
+    SetTextColor(hdc, CLR_TEXT_SECONDARY);
+    SelectObject(hdc, theme_font_small());
+
+    wchar_t meta[128];
+    _snwprintf(meta, 128, L"%d x %d", tex->width, tex->height);
+    RECT meta_rc = {text_x, text_y, x + card_w - 12, text_y + 14};
+    DrawTextW(hdc, meta, -1, &meta_rc, DT_LEFT | DT_SINGLELINE);
+
+    text_y += 14;
+    wchar_t mips_str[32];
+    _snwprintf(mips_str, 32, L"Mips: %d", tex->mip_count);
+    RECT mips_rc = {text_x, text_y, x + card_w - 12, text_y + 14};
+    DrawTextW(hdc, mips_str, -1, &mips_rc, DT_LEFT | DT_SINGLELINE);
+
+    /* Parent YTD name */
+    text_y += 14;
+    wchar_t wparent[256];
+    MultiByteToWideChar(CP_UTF8, 0, parent->name, -1, wparent, 256);
+    RECT parent_rc = {text_x, text_y, x + card_w - 12, text_y + 14};
+    DrawTextW(hdc, wparent, -1, &parent_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    /* Edit Button (mimic old tool) */
+    RECT edit_rc = {x + card_w - 62, y + card_h - 32, x + card_w - 12, y + card_h - 12};
+    HBRUSH edit_bg = CreateSolidBrush(RGB(60, 60, 60)); // Standard button bg
+    RoundRect(hdc, edit_rc.left, edit_rc.top, edit_rc.right, edit_rc.bottom, 4, 4);
+    FillRect(hdc, &edit_rc, edit_bg);
+    DeleteObject(edit_bg);
+    
+    SetTextColor(hdc, RGB(255, 255, 255));
+    SelectObject(hdc, theme_font_small());
+    DrawTextW(hdc, L"Edit", -1, &edit_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}

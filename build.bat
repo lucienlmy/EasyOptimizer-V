@@ -1,0 +1,52 @@
+@echo off
+setlocal
+
+where cl >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [ERROR] cl.exe not found. Run this from a Visual Studio Developer Command Prompt.
+    exit /b 1
+)
+
+if not exist "build" mkdir build
+
+set COMMON=/nologo /O2 /W3 /MD /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS
+set CFLAGS=%COMMON% /I vendor\bc7enc_rdo
+set CXXFLAGS=%COMMON% /EHsc /std:c++14 /DSUPPORT_BC7E=1
+
+set LDFLAGS=/link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib shlwapi.lib msimg32.lib bcrypt.lib
+
+set C_SOURCES=src\main.c src\theme.c src\hash.c src\ytd.c src\wtd.c src\dds.c src\texture.c src\gui.c src\gui_cards.c src\ydr.c src\optimizer.c src\nvtt_c_wrapper.c
+
+set CXX_SOURCES=src\bc7enc_wrapper.cpp vendor\bc7enc_rdo\bc7enc.cpp vendor\bc7enc_rdo\bc7decomp.cpp vendor\bc7enc_rdo\bc7decomp_ref.cpp vendor\bc7enc_rdo\rgbcx.cpp vendor\bc7enc_rdo\rdo_bc_encoder.cpp vendor\bc7enc_rdo\ert.cpp vendor\bc7enc_rdo\utils.cpp vendor\bc7enc_rdo\lodepng.cpp
+
+set ISPC_OBJS=vendor\bc7enc_rdo\bc7e.obj vendor\bc7enc_rdo\bc7e_sse2.obj vendor\bc7enc_rdo\bc7e_sse4.obj vendor\bc7enc_rdo\bc7e_avx.obj vendor\bc7enc_rdo\bc7e_avx2.obj
+
+echo [BUILD] Compiling C sources...
+for %%f in (%C_SOURCES%) do (
+    cl %CFLAGS% /c /Fo:build\ %%f
+    if errorlevel 1 goto :fail
+)
+
+echo [BUILD] Compiling C++ sources (bc7enc_rdo + stb + wrapper)...
+for %%f in (%CXX_SOURCES%) do (
+    cl %CXXFLAGS% /c /Fo:build\ /I vendor\bc7enc_rdo /I vendor\stb %%f
+    if errorlevel 1 goto :fail
+)
+
+echo [BUILD] Linking (with ISPC BC7 acceleration)...
+cl /nologo /Fe:build\EasyOptimizer-V.exe build\*.obj %ISPC_OBJS% res\app.res %LDFLAGS%
+
+if %errorlevel% equ 0 (
+    echo [OK] build\EasyOptimizer-V.exe
+) else (
+    goto :fail
+)
+
+goto :end
+
+:fail
+echo [FAIL] Build failed.
+exit /b 1
+
+:end
+endlocal
