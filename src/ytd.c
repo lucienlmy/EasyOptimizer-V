@@ -282,10 +282,10 @@ YtdFile *ytd_load(const wchar_t *filepath) {
     LOG("ytd_load: loading file");
     size_t file_size = 0;
     uint8_t *raw = read_file_bytes(filepath, &file_size);
-    if (!raw || file_size < 16) { LOG_ERR("ytd_load: file too small or unreadable"); free(raw); return NULL; }
+    if (!raw || file_size < 16) { LOG_ERR("ytd_load: file too small or unreadable"); SET_LOAD_ERR("file too small or unreadable"); free(raw); return NULL; }
 
     uint32_t magic = rd32(raw);
-    if (magic != RSC7_MAGIC) { LOG_ERR("ytd_load: bad magic 0x%08X (expected 0x%08X)", magic, RSC7_MAGIC); free(raw); return NULL; }
+    if (magic != RSC7_MAGIC) { LOG_ERR("ytd_load: bad magic 0x%08X (expected 0x%08X)", magic, RSC7_MAGIC); SET_LOAD_ERR("not an RSC7 YTD (bad magic 0x%08X)", magic); free(raw); return NULL; }
 
     uint32_t version = rd32(raw + 4);
     uint32_t sys_flags = rd32(raw + 8);
@@ -306,7 +306,7 @@ YtdFile *ytd_load(const wchar_t *filepath) {
     size_t decompressed_size = 0;
     uint8_t *payload = rsc7_decompress(raw + 16, file_size - 16, total, &decompressed_size);
     free(raw);
-    if (!payload) { LOG_ERR("ytd_load: rsc7_decompress failed (comp_size=%zu, expected=%zu)", file_size - 16, total); return NULL; }
+    if (!payload) { LOG_ERR("ytd_load: rsc7_decompress failed (comp_size=%zu, expected=%zu)", file_size - 16, total); SET_LOAD_ERR("decompression failed (corrupt or unsupported)"); return NULL; }
     LOG("ytd_load: decompressed %zu bytes", decompressed_size);
 
     uint8_t *vdata = payload;
@@ -319,7 +319,7 @@ YtdFile *ytd_load(const wchar_t *filepath) {
     uint16_t count = rd16(vdata + 0x28);
     uint64_t items_ptr = rd64(vdata + 0x30);
     LOG("ytd_load: texture count=%u items_ptr=0x%llX", count, (unsigned long long)items_ptr);
-    if (count == 0 || count > 4096) { LOG_ERR("ytd_load: invalid count %u", count); free(payload); return NULL; }
+    if (count == 0 || count > 4096) { LOG_ERR("ytd_load: invalid count %u", count); SET_LOAD_ERR("invalid texture count %u (maybe Gen9/enhanced format)", count); free(payload); return NULL; }
 
     if (items_ptr < VIRTUAL_BASE) { LOG_ERR("ytd_load: invalid items pointer"); free(payload); return NULL; }
     size_t items_off = (size_t)(items_ptr - VIRTUAL_BASE);

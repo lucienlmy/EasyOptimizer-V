@@ -4,7 +4,11 @@
 #include <windows.h>
 #include "types.h"
 
-#define MAX_LOADED_YTDS 256
+/* Upper bound on simultaneously-loaded archives. Raised well above the old 256
+ * so large RPF mod packs (NVE entries number in the thousands) fit. The array
+ * is just pointers (8 bytes each = 64 KB); real memory scales only with what
+ * actually loads, and OOM is handled gracefully (allocations are NULL-checked). */
+#define MAX_LOADED_YTDS 8192
 #define RPF_ENTRY_H 42
 
 typedef struct {

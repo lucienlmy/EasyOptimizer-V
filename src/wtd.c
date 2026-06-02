@@ -80,6 +80,7 @@ YtdFile *wtd_load(const wchar_t *path) {
     uint32_t magic = *(uint32_t*)fileData;
     if (magic != WTD_RSC5_MAGIC) {
         LOG("[ERR] wtd_load: Invalid magic 0x%08X", magic);
+        SET_LOAD_ERR("not an RSC5 WTD (bad magic 0x%08X)", magic);
         free(fileData);
         return NULL;
     }

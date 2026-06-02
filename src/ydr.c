@@ -257,10 +257,10 @@ YtdFile *ydr_load(const wchar_t *filepath) {
     LOG("ydr_load: loading file");
     size_t file_size = 0;
     uint8_t *raw = read_file_bytes(filepath, &file_size);
-    if (!raw || file_size < 16) { free(raw); return NULL; }
+    if (!raw || file_size < 16) { free(raw); SET_LOAD_ERR("file too small or unreadable"); return NULL; }
 
     uint32_t magic = rd32(raw);
-    if (magic != RSC7_MAGIC) { free(raw); return NULL; }
+    if (magic != RSC7_MAGIC) { free(raw); SET_LOAD_ERR("not an RSC7 resource (bad magic)"); return NULL; }
 
     uint32_t version = rd32(raw + 4);
     uint32_t sys_flags = rd32(raw + 8);
@@ -269,19 +269,19 @@ YtdFile *ydr_load(const wchar_t *filepath) {
     size_t sys_size = rsc7_size_from_flags(sys_flags);
     size_t gfx_size = rsc7_size_from_flags(gfx_flags);
     size_t total = sys_size + gfx_size;
-    if (total == 0) { free(raw); return NULL; }
+    if (total == 0) { free(raw); SET_LOAD_ERR("invalid resource size flags"); return NULL; }
 
     size_t decompressed_size = 0;
     uint8_t *payload = rsc7_decompress(raw + 16, file_size - 16, total, &decompressed_size);
     free(raw);
-    if (!payload) return NULL;
+    if (!payload) { SET_LOAD_ERR("RSC7 decompression failed"); return NULL; }
 
     uint8_t *vdata = payload;
     size_t vdata_len = sys_size;
     uint8_t *pdata = payload + sys_size;
     size_t pdata_len = gfx_size;
 
-    if (vdata_len < 0x40) { free(payload); return NULL; }
+    if (vdata_len < 0x40) { free(payload); SET_LOAD_ERR("system segment too small"); return NULL; }
 
     /* Determine file type by extension */
     const wchar_t *ext = wcsrchr(filepath, L'.');
@@ -343,6 +343,7 @@ YtdFile *ydr_load(const wchar_t *filepath) {
 
     if (total_loaded == 0) {
         LOG("ydr_load: no embedded textures found");
+        SET_LOAD_ERR("no embedded textures (model has no texture dictionary)");
         free(temp_textures);
         return NULL;
     }

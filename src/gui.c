@@ -193,6 +193,7 @@ typedef enum {
 static ArchiveSortMode g_sort_mode = SORT_BY_NAME;
 static int g_scan_candidates = 0;
 static int g_scan_failed = 0;
+static bool g_bulk_add = false;   /* true during folder scans / multi-file loads */
 
 typedef struct {
     bool ytd;
@@ -628,6 +629,8 @@ static void open_file_dialog(HWND parent) {
         if (SUCCEEDED(hr) && items) {
             DWORD count = 0;
             items->lpVtbl->GetCount(items, &count);
+            bool prev_bulk = g_bulk_add;
+            if (count > 1) g_bulk_add = true;   /* multi-select: collapse */
             for (DWORD i = 0; i < count; i++) {
                 IShellItem *item = NULL;
                 if (SUCCEEDED(items->lpVtbl->GetItemAt(items, i, &item)) && item) {
@@ -639,6 +642,7 @@ static void open_file_dialog(HWND parent) {
                     item->lpVtbl->Release(item);
                 }
             }
+            g_bulk_add = prev_bulk;
             items->lpVtbl->Release(items);
         }
     }
@@ -695,7 +699,10 @@ static void open_folder_dialog(HWND parent) {
                 int before = g_app.ytd_count;
                 g_scan_candidates = 0;
                 g_scan_failed = 0;
+                bool prev_bulk = g_bulk_add;
+                g_bulk_add = true;                 /* folder scan: collapse all */
                 scan_folder_recursive(folder);
+                g_bulk_add = prev_bulk;
                 int added = g_app.ytd_count - before;
                 gui_update_status("Folder scan: %d compatible, %d loaded, %d rejected",
                     g_scan_candidates, added, g_scan_failed);
@@ -783,7 +790,12 @@ static bool import_rpf_entry(const wchar_t *entry_path, const uint8_t *data,
 }
 
 void gui_add_ytd(const wchar_t *path) {
-    if (g_app.ytd_count >= MAX_LOADED_YTDS) return;
+    if (g_app.ytd_count >= MAX_LOADED_YTDS) {
+        SET_LOAD_ERR("workspace full (limit %d entries reached)", MAX_LOADED_YTDS);
+        LOG_ERR("gui_add_ytd: rejected '%ls': workspace full (%d/%d)",
+                embedded_file_name(path), g_app.ytd_count, MAX_LOADED_YTDS);
+        return;
+    }
     if (!is_supported_archive_path(path)) {
         gui_update_status("Unsupported file type");
         return;
@@ -836,14 +848,19 @@ void gui_add_ytd(const wchar_t *path) {
     }
 
     LOG("gui_add_ytd: adding file");
+    g_load_error[0] = 0;
     YtdFile *archive = load_archive_path(path);
     if (!archive) {
-        LOG_ERR("gui_add_ytd: failed to load file");
-        gui_update_status("Failed to load file");
+        const wchar_t *leaf = embedded_file_name(path);
+        const char *reason = g_load_error[0] ? g_load_error : "unknown load error";
+        LOG_ERR("gui_add_ytd: rejected '%ls': %s", leaf, reason);
+        gui_update_status("Rejected '%ls': %s", leaf, reason);
         return;
     }
 
-    archive->expanded = true;
+    /* Auto-expand only a lone file; bulk loads (folders / multi-select) stay
+     * collapsed so the user gets a browsable list instead of one giant archive. */
+    archive->expanded = (!g_bulk_add && g_app.ytd_count == 0);
     g_app.ytds[g_app.ytd_count++] = archive;
     apply_archive_sort();
     gui_update_status("Loaded %s - %d textures", archive->name, archive->texture_count);
@@ -2346,23 +2363,50 @@ static void paint_sidebar(HWND hwnd, HDC hdc) {
         if (g_sidebar_btns[i].visible) visible_btns++;
     int y = 16 + visible_btns * 44 + 16;
     if (g_app.ytd_count > 0) {
+        /* Count top-level entries (RPF entries are listed under their group, not here). */
+        int total_top = 0;
+        for (int i = 0; i < g_app.ytd_count; i++)
+            if (!g_app.ytds[i]->from_rpf) total_top++;
+
         SetTextColor(hdc, CLR_TEXT_SECONDARY);
         SelectObject(hdc, theme_font_small());
+        wchar_t hdr[64];
+        _snwprintf(hdr, 64, L"LOADED FILES (%d)", total_top);
         RECT label_rc = {12, y, SIDEBAR_WIDTH - 12, y + 20};
-        DrawTextW(hdc, L"LOADED FILES", -1, &label_rc, DT_LEFT | DT_SINGLELINE);
+        DrawTextW(hdc, hdr, -1, &label_rc, DT_LEFT | DT_SINGLELINE);
         y += 24;
 
         SetTextColor(hdc, CLR_TEXT_PRIMARY);
         SelectObject(hdc, theme_font_small());
+        int shown = 0;
         for (int i = 0; i < g_app.ytd_count; i++) {
-            wchar_t wname[256];
-            MultiByteToWideChar(CP_UTF8, 0, g_app.ytds[i]->name, -1, wname, 256);
+            YtdFile *a = g_app.ytds[i];
+            if (a->from_rpf) continue;   /* entries shown nested in the content view */
 
+            /* Stop before running off the bottom; leave a row for the "+N more" note. */
+            if (y + 18 > rc.bottom - 22) {
+                int remaining = total_top - shown;
+                if (remaining > 0) {
+                    SetTextColor(hdc, CLR_TEXT_SECONDARY);
+                    wchar_t more[48];
+                    _snwprintf(more, 48, L"+ %d more...", remaining);
+                    RECT more_rc = {16, y, SIDEBAR_WIDTH - 8, y + 18};
+                    DrawTextW(hdc, more, -1, &more_rc, DT_LEFT | DT_SINGLELINE);
+                }
+                break;
+            }
+
+            wchar_t wname[256];
+            MultiByteToWideChar(CP_UTF8, 0, a->name, -1, wname, 256);
             wchar_t line[300];
-            _snwprintf(line, 300, L"%s (%d tex)", wname, g_app.ytds[i]->texture_count);
+            if (a->is_rpf_group)
+                _snwprintf(line, 300, L"%s (RPF)", wname);
+            else
+                _snwprintf(line, 300, L"%s (%d tex)", wname, a->texture_count);
             RECT item_rc = {16, y, SIDEBAR_WIDTH - 8, y + 18};
             DrawTextW(hdc, line, -1, &item_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             y += 20;
+            shown++;
         }
     }
 }
@@ -2400,12 +2444,15 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             DragFinish(hDrop);
             return 0;
         }
+        bool prev_bulk = g_bulk_add;
+        if (count > 1) g_bulk_add = true;   /* dropping many: collapse */
         for (int i = 0; i < count; i++) {
             wchar_t path[MAX_PATH];
             DragQueryFileW(hDrop, i, path, MAX_PATH);
             if (PathMatchSpecW(path, L"*.ytd;*.wtd;*.ydr;*.yft;*.ydd;*.rpf"))
                 gui_add_ytd(path);
         }
+        g_bulk_add = prev_bulk;
         DragFinish(hDrop);
         return 0;
     }

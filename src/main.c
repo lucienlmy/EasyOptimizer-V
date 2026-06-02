@@ -8,6 +8,7 @@
  * embedded manifest (res/app.manifest, linked through res/app.rc). */
 
 FILE *g_log_file = NULL;
+char g_load_error[256] = {0};
 
 LONG WINAPI CrashHandler(EXCEPTION_POINTERS *ExceptionInfo) {
     unsigned long code = ExceptionInfo->ExceptionRecord->ExceptionCode;
