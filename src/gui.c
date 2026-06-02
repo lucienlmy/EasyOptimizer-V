@@ -1736,8 +1736,10 @@ static void do_same_format_recompress(void) {
 
 static void choose_recompress_mode(void) {
     enum {
-        ID_RECOMPRESS_OPTIMIZE = 1,
-        ID_RECOMPRESS_SAME_FORMAT = 2
+        /* Must NOT collide with IDOK(1) or IDCANCEL(2); TaskDialog returns those
+         * when the user dismisses the dialog via X or Escape. */
+        ID_RECOMPRESS_OPTIMIZE    = 100,
+        ID_RECOMPRESS_SAME_FORMAT = 101
     };
     const TASKDIALOG_BUTTON buttons[] = {
         {ID_RECOMPRESS_OPTIMIZE,
