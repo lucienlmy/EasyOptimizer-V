@@ -122,10 +122,15 @@ struct Crypto {
                                  const std::string &archive_name, uint32_t archive_size) const {
         if (encryption == NONE_ENCRYPTION || encryption == OPEN_ENCRYPTION) return data;
         if (encryption == AES_ENCRYPTION) return decrypt_aes(std::move(data));
-        if (encryption != NG_ENCRYPTION) throw std::runtime_error("unsupported RPF encryption");
-        if (ng_blob.size() < NG_KEYS_SIZE + 278528U || lut.size() != 256U)
-            throw std::runtime_error("NG-encrypted RPF requires ng.dat and lut.dat beside the executable");
-        return decrypt_ng(std::move(data), archive_name, archive_size);
+        if (encryption == NG_ENCRYPTION) {
+            if (ng_blob.size() < NG_KEYS_SIZE + 278528U || lut.size() != 256U)
+                throw std::runtime_error("NG-encrypted RPF requires ng.dat and lut.dat beside the executable");
+            return decrypt_ng(std::move(data), archive_name, archive_size);
+        }
+        /* Unknown/custom encryption marker (e.g. some modded RPFs such as the
+         * "CFXP" 0x50584643 tag): these store a plain-text table of contents,
+         * so pass it through unchanged rather than failing the whole archive. */
+        return data;
     }
 
     std::vector<uint8_t> decrypt_aes(std::vector<uint8_t> data) const {
@@ -167,17 +172,25 @@ struct Crypto {
 
     void round(uint8_t *block, size_t key_base, size_t round_index, bool shuffle) const {
         const size_t t = round_index * 16U * 256U;
+        /* RoundA (shuffle=false) uses sequential byte indices (indexes[i]==i);
+         * RoundB (shuffle=true) applies the GTA-NG byte permutation. The cell at
+         * position 5 must be 5 for RoundA and 4 for RoundB (was hard-coded to 4,
+         * which corrupted RoundA and broke NG decryption). */
         const size_t indexes[16] = {
             0U, shuffle ? 7U : 1U, shuffle ? 10U : 2U, shuffle ? 13U : 3U,
-            shuffle ? 1U : 4U, 4U, shuffle ? 11U : 6U, shuffle ? 14U : 7U,
+            shuffle ? 1U : 4U, shuffle ? 4U : 5U, shuffle ? 11U : 6U, shuffle ? 14U : 7U,
             shuffle ? 2U : 8U, shuffle ? 5U : 9U, shuffle ? 8U : 10U, shuffle ? 15U : 11U,
             shuffle ? 3U : 12U, shuffle ? 6U : 13U, shuffle ? 9U : 14U, shuffle ? 12U : 15U
         };
         uint32_t out[4];
         for (size_t row = 0; row < 4; ++row) {
             out[row] = rd32(ng_blob.data() + key_base + row * 4U);
-            for (size_t col = 0; col < 4; ++col)
-                out[row] ^= table(t + (row * 4U + col) * 256U, block[indexes[row * 4U + col]]);
+            for (size_t col = 0; col < 4; ++col) {
+                /* GTA-NG uses table[k][byte[k]]: the table cell index is the same
+                 * permuted byte index, NOT a sequential cell index. */
+                const size_t idx = indexes[row * 4U + col];
+                out[row] ^= table(t + idx * 256U, block[idx]);
+            }
         }
         for (size_t i = 0; i < 4; ++i) wr32(out[i], block + i * 4U);
     }
@@ -351,7 +364,11 @@ extern "C" int rpf_scan_file(const wchar_t *path, RpfScanCallback callback, void
                               char *error, size_t error_size) {
     try {
         Reader reader(path);
-        const wchar_t *leaf = wcsrchr(path, L'\\');
+        /* The NG key index is derived from the archive's *file name* only, so
+         * strip any directory prefix using either separator. */
+        const wchar_t *bslash = wcsrchr(path, L'\\');
+        const wchar_t *fslash = wcsrchr(path, L'/');
+        const wchar_t *leaf = bslash > fslash ? bslash : fslash;
         leaf = leaf ? leaf + 1 : path;
         const int required = WideCharToMultiByte(CP_UTF8, 0, leaf, -1, NULL, 0, NULL, NULL);
         std::string archive_name(required > 0 ? static_cast<size_t>(required) : 0, '\0');

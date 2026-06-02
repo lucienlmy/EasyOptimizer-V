@@ -41,6 +41,7 @@ AppState g_app = {0};
 #define ID_SIDEBAR_SORT       1011
 #define ID_SIDEBAR_MIGRATE    1013
 #define ID_SIDEBAR_SAMEFORMAT 1014
+#define ID_SIDEBAR_GRID       1015
 
 #define IDC_DET_CRITERION 3030
 #define IDC_MIG_CRITERION 3031
@@ -91,10 +92,16 @@ typedef struct {
 #define SIDEBAR_WIDTH   220
 #define HEADER_HEIGHT   56
 #define STATUS_HEIGHT   28
-#define CARD_W          220
-#define CARD_H          260
 #define CARD_MARGIN     8
 #define FOLDER_H        56
+
+/* Texture grid card size is adjustable at runtime (Small / Medium / Native),
+ * mirroring the C# "Grid" button. CARD_W/CARD_H read the active size. */
+static int g_grid_index = 1;   /* 0=Small, 1=Medium, 2=Native */
+static const int g_grid_w[3] = {160, 220, 300};
+static const int g_grid_h[3] = {200, 260, 340};
+#define CARD_W (g_grid_w[g_grid_index])
+#define CARD_H (g_grid_h[g_grid_index])
 
 /* ── Forward declarations ──────────────────────────────────────────── */
 
@@ -151,6 +158,7 @@ static SidebarButton g_sidebar_btns[] = {
     {{0}, ID_SIDEBAR_TOGGLE_ENC, L"Encoder: CPU",   false, true},
     {{0}, ID_SIDEBAR_LANGUAGE,   L"Language: English", false, true},
     {{0}, ID_SIDEBAR_SORT,       L"Sort: Name", false, true},
+    {{0}, ID_SIDEBAR_GRID,       L"Grid: Medium", false, true},
 };
 #define SIDEBAR_BTN_COUNT (sizeof(g_sidebar_btns)/sizeof(g_sidebar_btns[0]))
 
@@ -356,6 +364,13 @@ static void update_sidebar_labels(void) {
         case SORT_BY_TEXTURE_COUNT: g_sidebar_btns[11].text = trw8(L"Sort: Textures", L"Ordenar: Texturas", L"Ordenar: Texturas", L"Сорт.: Текстуры", L"Sırala: Dokular", L"排序: 纹理数", L"क्रम: टेक्सचर", L"並べ替え: テクスチャ"); break;
         case SORT_BY_MODIFIED: g_sidebar_btns[11].text = trw8(L"Sort: Modified", L"Ordenar: Modificados", L"Ordenar: Modificados", L"Сорт.: Изменены", L"Sırala: Değişen", L"排序: 已修改", L"क्रम: संशोधित", L"並べ替え: 更新"); break;
         default: g_sidebar_btns[11].text = trw8(L"Sort: Name", L"Ordenar: Nome", L"Ordenar: Nombre", L"Сорт.: Имя", L"Sırala: Ad", L"排序: 名称", L"क्रम: नाम", L"並べ替え: 名前"); break;
+    }
+    {
+        const wchar_t *gname =
+            (g_grid_index == 0) ? trw8(L"Grid: Small", L"Grade: Pequena", L"Cuadrícula: Pequeña", L"Сетка: Малая", L"Izgara: Küçük", L"网格: 小", L"ग्रिड: छोटा", L"グリッド: 小") :
+            (g_grid_index == 2) ? trw8(L"Grid: Native", L"Grade: Nativa", L"Cuadrícula: Nativa", L"Сетка: Полная", L"Izgara: Yerel", L"网格: 原生", L"ग्रिड: मूल", L"グリッド: ネイティブ") :
+                                  trw8(L"Grid: Medium", L"Grade: Média", L"Cuadrícula: Media", L"Сетка: Средняя", L"Izgara: Orta", L"网格: 中", L"ग्रिड: मध्यम", L"グリッド: 中");
+        g_sidebar_btns[12].text = gname;
     }
 }
 
@@ -2268,6 +2283,17 @@ static void paint_content(HWND hwnd, HDC hdc) {
 
     g_app.content_height = y + g_app.scroll_y;
 
+    /* Clamp scroll to valid range; if the view was scrolled past the (now
+     * shorter) content, snap back and repaint so cards don't render off-screen. */
+    {
+        int max_scroll = g_app.content_height - rc.bottom;
+        if (max_scroll < 0) max_scroll = 0;
+        if (g_app.scroll_y > max_scroll) {
+            g_app.scroll_y = max_scroll;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+    }
+
     /* Update scrollbar */
     SCROLLINFO si = {sizeof(si)};
     si.fMask = SIF_RANGE | SIF_PAGE;
@@ -2447,8 +2473,11 @@ static LRESULT CALLBACK ContentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             case SB_PAGEDOWN: si.nPos += si.nPage; break;
             case SB_THUMBTRACK: si.nPos = si.nTrackPos; break;
         }
+        int vmax = si.nMax - (int)si.nPage;   /* may be negative when content fits */
+        if (vmax < 0) vmax = 0;
+        if (si.nPos > vmax) si.nPos = vmax;
         if (si.nPos < 0) si.nPos = 0;
-        if (si.nPos > si.nMax - (int)si.nPage) si.nPos = si.nMax - (int)si.nPage;
+        (void)old;
         g_app.scroll_y = si.nPos;
         si.fMask = SIF_POS;
         SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
@@ -2459,6 +2488,10 @@ static LRESULT CALLBACK ContentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(wp);
         g_app.scroll_y -= delta / 2;
+        RECT wrc; GetClientRect(hwnd, &wrc);
+        int wmax = g_app.content_height - wrc.bottom;
+        if (wmax < 0) wmax = 0;
+        if (g_app.scroll_y > wmax) g_app.scroll_y = wmax;
         if (g_app.scroll_y < 0) g_app.scroll_y = 0;
         SCROLLINFO si = {sizeof(si), SIF_POS};
         si.nPos = g_app.scroll_y;
@@ -2589,6 +2622,13 @@ static LRESULT CALLBACK SidebarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                     case ID_SIDEBAR_SORT:
                         g_sort_mode = (ArchiveSortMode)((g_sort_mode + 1) % 5);
                         apply_archive_sort();
+                        update_sidebar_labels();
+                        InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                        InvalidateRect(hwnd, NULL, TRUE);
+                        break;
+                    case ID_SIDEBAR_GRID:
+                        g_grid_index = (g_grid_index + 1) % 3;   /* Small -> Medium -> Native */
+                        g_app.scroll_y = 0;                      /* card sizes changed; reset view */
                         update_sidebar_labels();
                         InvalidateRect(g_app.hwnd_content, NULL, TRUE);
                         InvalidateRect(hwnd, NULL, TRUE);
