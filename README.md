@@ -1,5 +1,4 @@
 # EasyOptimizer-V
-### by [LN-Development](https://github.com/LN-Development/EasyOptimizer-V)
 
 A high-performance GTA V texture optimizer and manager written in native C/C++ for Windows.  
 Edit YTD files without extracting, find duplicates, resize, generate mips, and more.
