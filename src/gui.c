@@ -411,7 +411,7 @@ void gui_init(HINSTANCE hInst) {
     wc3.lpszClassName = L"EasyOptimizerSidebar";
     RegisterClassExW(&wc3);
 
-    g_app.hwnd_main = CreateWindowExW(0, L"EasyOptimizerMain", L"EasyOptimizer-V",
+    g_app.hwnd_main = CreateWindowExW(0, L"EasyOptimizerMain", L"EasyOptimizer-V by LN-Development",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1100, 768,
         NULL, NULL, hInst, NULL);
 
@@ -2383,8 +2383,8 @@ static void paint_sidebar(HWND hwnd, HDC hdc) {
             YtdFile *a = g_app.ytds[i];
             if (a->from_rpf) continue;   /* entries shown nested in the content view */
 
-            /* Stop before running off the bottom; leave a row for the "+N more" note. */
-            if (y + 18 > rc.bottom - 22) {
+            /* Stop before running off the bottom; leave room for Sponsor btn + "+N more" */
+            if (y + 18 > rc.bottom - 58) {
                 int remaining = total_top - shown;
                 if (remaining > 0) {
                     SetTextColor(hdc, CLR_TEXT_SECONDARY);
@@ -2408,6 +2408,22 @@ static void paint_sidebar(HWND hwnd, HDC hdc) {
             y += 20;
             shown++;
         }
+    }
+
+    /* ── Sponsor button — pinned to the bottom of the sidebar ──────── */
+    {
+        RECT btn = {8, rc.bottom - 40, SIDEBAR_WIDTH - 8, rc.bottom - 8};
+        HBRUSH fill = CreateSolidBrush(RGB(0x1F, 0x6F, 0xEB));   /* GitHub-blue */
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(0x1A, 0x5E, 0xCC));
+        HPEN oldP = (HPEN)SelectObject(hdc, pen);
+        HBRUSH oldB = (HBRUSH)SelectObject(hdc, fill);
+        RoundRect(hdc, btn.left, btn.top, btn.right, btn.bottom, 8, 8);
+        SelectObject(hdc, oldP); SelectObject(hdc, oldB);
+        DeleteObject(pen); DeleteObject(fill);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, CLR_TEXT_PRIMARY);
+        SelectObject(hdc, theme_font_small_bold());
+        DrawTextW(hdc, L"♥  Sponsor", -1, &btn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
 
@@ -2638,6 +2654,21 @@ static LRESULT CALLBACK SidebarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     case WM_LBUTTONDOWN: {
         int mx = GET_X_LPARAM(lp);
         int my = GET_Y_LPARAM(lp);
+
+        /* Sponsor button pinned to sidebar bottom */
+        {
+            RECT sb_rc;
+            GetClientRect(hwnd, &sb_rc);
+            RECT btn = {8, sb_rc.bottom - 40, SIDEBAR_WIDTH - 8, sb_rc.bottom - 8};
+            POINT pt = {mx, my};
+            if (PtInRect(&btn, pt)) {
+                ShellExecuteW(NULL, L"open",
+                    L"https://github.com/LN-Development/EasyOptimizer-V",
+                    NULL, NULL, SW_SHOWNORMAL);
+                return 0;
+            }
+        }
+
         for (int i = 0; i < (int)SIDEBAR_BTN_COUNT; i++) {
             if (!g_sidebar_btns[i].visible) continue;
             POINT pt = {mx, my};
