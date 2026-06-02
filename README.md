@@ -1,46 +1,82 @@
 # EasyOptimizer-V
+### by [LN-Development](https://github.com/LN-Development/EasyOptimizer-V)
 
-A high-performance GTA V texture optimizer written in C.
+A high-performance GTA V texture optimizer and manager written in native C/C++ for Windows.  
+Edit YTD files without extracting, find duplicates, resize, generate mips, and more.
+
+> ♥ [Sponsor the project](https://github.com/LN-Development/EasyOptimizer-V)
+
+---
 
 ## Features
 
-- **YTD/WTD/YDR/YFT/YDD support** — Load texture dictionaries and extract embedded textures from drawables, fragments, and drawable dictionaries
-- **Smart Optimize** — Batch resize and recompress textures with configurable max resolution, format, and mipmap settings
-- **Fast Recompress** — One-click recompression of all loaded textures using the active encoder
-- **CPU & GPU Encoding** — Toggle between bc7enc (CPU) and NVTT (GPU via `nvtt.dll`) for BC1/BC3/BC5/BC7 compression
-- **Per-Texture Editing** — Resize, change format, and set mipmaps for individual textures
-- **Duplicate Finder** — Find duplicate textures by name or data hash across all loaded files
-- **Folder Scanner** — Recursively scan directories for all supported file types
-- **Drag & Drop** — Drop files directly into the window to load them
+### File Support
+| Format | Read | Write | Notes |
+|--------|------|-------|-------|
+| `.ytd` | ✅ | ✅ | GTA V texture dictionary (RSC7, Legacy & Gen9) |
+| `.wtd` | ✅ | ✅ | GTA IV streaming texture dictionary (RSC5) |
+| `.ydr` | ✅ | — | GTA V drawable (embedded textures extracted) |
+| `.yft` | ✅ | — | GTA V fragment (embedded textures extracted) |
+| `.ydd` | ✅ | — | GTA V drawable dictionary (embedded textures extracted) |
+| `.rpf` | ✅ | — | RPF7 archives — AES, NG and CFXP (OpenIV/FiveM mods) decryption supported |
 
-- **Sorting** - Sort loaded archives by name, type, total size, texture count, or modified state
-- **Languages** - Switch the main interface between 15 languages: English, Portuguese, Spanish, Russian, Turkish, Mandarin Chinese, Hindi, Japanese, Arabic, Bengali, French, German, Indonesian, Korean, and Italian
+### Texture Operations
+- **Smart Optimize** — Batch resize and recompress with configurable max resolution, format, and mipmap settings
+- **Fast Recompress** — One-click recompression with optional format downgrade (e.g. BC3 → BC1 when alpha is unused) to maximise space savings
+- **Recompress Same Format** — Re-encode without changing format, resolution, or mip count
+- **Per-Texture Editing** — Right-click any texture card to resize, convert format, export as DDS, unload changes (revert to original), or remove
+- **Mipmap Generation** — Auto-generate a full mip chain using stb_image_resize2 (Mitchell filter)
+- **DDS Export** — Export individual textures as DDS files
+
+### Duplicate Management
+- **Detect Duplicates** — Find duplicate textures across all loaded files by name, data hash (SHA-256), or both simultaneously
+- **Migrate Dups** — Preview the migration before applying: consolidated YTDs are shown in the UI with an amber border marked `PREVIEW`; choose "Maintain" per consolidated file to keep originals, then click Migrate to commit
+
+### Encoding
+- **CPU Encoder** — bc7enc_rdo with ISPC acceleration (BC1, BC2, BC3, BC4, BC5, BC7)
+- **GPU Encoder** — NVIDIA Texture Tools 3 (NVTT 3.2.5+) for BC1/BC3/BC7 via CUDA
+- Toggle between CPU and GPU with the sidebar button; the log always reports which encoder is active
+
+### Loading & Organisation
+- **Folder Scanner** — Recursively scan directories for all supported file types; bulk loads start collapsed for a clean overview
+- **RPF Archives** — Load `.rpf` files directly; entries are listed under the RPF group and can be expanded individually
+- **Drag & Drop** — Drop files or folders directly into the window
+- **Import Filter** — Choose which file types to import (YTD / WTD / YFT / YDD / YDR / RPF) per session
+- **Grid Sizes** — Cycle texture cards between Small (160×200), Medium (220×260), and Native (300×340)
+- **Sorting** — Sort loaded archives by name, type, total size, texture count, or modified state
+- **Unload / Remove** — Right-click any archive or texture to remove it from the workspace (disk untouched) or revert edits back to the on-disk original
+
+### UI & Languages
+- Dark theme with colour-coded size indicators (green ≤ 12 MiB → red > 64 MiB for whole archives)
+- Supports **15 languages**: English, Portuguese, Spanish, Russian, Turkish, Mandarin Chinese, Hindi, Japanese, Arabic, Bengali, French, German, Indonesian, Korean, Italian
+
+---
 
 ## Saving
 
-`Save All` creates a versioned project cache under
-`projects\project-YYYYMMDD-HHMMSS-mmm\` next to the executable before writing
-files. It then offers:
+`Save All` creates a versioned project cache under  
+`projects\project-YYYYMMDD-HHMMSS-mmm\` next to the executable before writing any files, then offers:
 
-- **Yes** - replace original YTD/WTD files
-- **No** - save copies to another folder
-- **Cancel** - keep files unchanged
+- **Replace originals** — overwrite the source YTD/WTD files
+- **Save to folder** — copy to a chosen directory
+- **Cache only** — keep a snapshot without touching originals
 
-The same popup also offers a cache-only snapshot without replacing files.
-YDR/YFT/YDD inputs are read-only models: their extracted textures can be saved
-as YTD copies, but the original model files are never overwritten.
+YDR/YFT/YDD model inputs are **read-only**: their extracted textures can be saved as standalone YTD copies, but the original model files are never overwritten.  
+RPF entries loaded from archives are also read-only — the source RPF is never modified.
+
+---
 
 ## Building
 
 ### Requirements
 
-- **Windows 10+**
-- **Visual Studio 2019+** (MSVC toolchain with `cl.exe`)
-- No external dependencies needed — all libraries are vendored
+- **Windows 10 or later**
+- **Visual Studio 2019+** with the C++ desktop workload (`cl.exe`, `link.exe`)
+- No additional downloads needed — all libraries are vendored
 
 ### Steps
 
-1. Open a **Developer Command Prompt for Visual Studio** (or run `vcvars64.bat`)
+1. Open a **Developer Command Prompt for Visual Studio** (or run `vcvars64.bat` manually)
 2. Navigate to this directory
 3. Run:
 
@@ -48,50 +84,64 @@ as YTD copies, but the original model files are never overwritten.
 build.bat
 ```
 
-The compiled executable will be at `build\EasyOptimizer-V.exe`.
+The compiled executable is placed at `build\EasyOptimizer-V.exe`.
 
-### Optional: GPU Encoding
+### GPU Encoding (optional)
 
-Place `nvtt.dll` (from NVIDIA Texture Tools) next to the executable to enable GPU-accelerated texture compression.
+Place `nvtt30205.dll` (NVIDIA Texture Tools 3.2.5+) and `vcomp140.dll` beside the executable to enable GPU-accelerated BC1/BC3/BC7 compression via CUDA.  
+The app probes for the DLL at startup and reports its status in the log. Falls back to CPU encoding automatically if unavailable.
+
+### NG-encrypted RPF Support (optional)
+
+Place `ng.dat` and `lut.dat` (key tables extracted from the GTA V executable) beside the executable to enable reading of NG-encrypted RPF archives (vanilla GTA V game files). Without these files, only AES-encrypted and plain-TOC RPFs are supported.
+
+---
 
 ## Project Structure
 
 ```
-src/            — Source code
-  gui.c         — Main window, sidebar, dialogs
-  gui_cards.c   — Texture card rendering
-  ytd.c         — GTA V YTD (RSC7) loader/saver
-  wtd.c         — GTA IV WTD (RSC5) loader/saver
-  ydr.c         — YDR/YFT/YDD embedded texture extractor
-  optimizer.c   — Smart resize & duplicate finder
-  texture.c     — Mipmap generation & format conversion
-  bc7enc_wrapper.cpp — bc7enc_rdo integration
-  nvtt_c_wrapper.c   — NVTT GPU encoder (optional)
-  theme.c       — Dark theme colors & fonts
-  hash.c        — Jenkins one-at-a-time hash
-  dds.c         — DDS file export
-  main.c        — Entry point
-vendor/         — Third-party libraries (bc7enc_rdo, stb)
-res/            — Windows resource files (manifest, icon)
-build.bat       — Build script
+src/
+  gui.c               — Main window, sidebar, all dialogs and UI logic
+  gui_cards.c         — Texture card and archive card rendering
+  ytd.c               — GTA V YTD (RSC7) loader/saver
+  wtd.c               — GTA IV WTD (RSC5) loader/saver
+  ydr.c               — YDR/YFT/YDD embedded texture extractor
+  rpf_scan.cpp        — RPF7 archive scanner (AES / NG / CFXP decryption)
+  optimizer.c         — Smart resize, duplicate finder, migration engine
+  texture.c           — Mipmap generation, format conversion, snapshot/revert
+  bc7enc_wrapper.cpp  — bc7enc_rdo ISPC integration
+  nvtt_c_wrapper.c    — NVTT 3 GPU encoder wrapper
+  theme.c             — Dark theme colours and fonts
+  hash.c              — Jenkins one-at-a-time hash
+  dds.c               — DDS file export
+  main.c              — Entry point, crash handler
+vendor/               — Third-party libraries (bc7enc_rdo, stb, miniz)
+res/                  — Windows resources (manifest, version info)
+build.bat             — Build script
 ```
 
-## Credits, Acknowledgments & Licenses
+---
 
-This project was built with knowledge and inspiration and use code from the following projects:
+## Credits & Licenses
 
-- **[FiveFury](https://github.com/Hancapo/fivefury)** by Hancapo — MIT License
-- **[CodeWalker](https://github.com/dexyfex/CodeWalker)** by dexyfex — Educational Purposes Only
-- **bc7enc_rdo** — MIT License
-- **stb** (stb_image, stb_image_resize2) — Public Domain
-- **miniz** — MIT License
-- **Thanks** to ook3d for .wtd support
+This project was built with knowledge and inspiration from the following works:
 
+| Project | Author | License |
+|---------|--------|---------|
+| [FiveFury](https://github.com/Hancapo/fivefury) | Hancapo | MIT |
+| [CodeWalker](https://github.com/dexyfex/CodeWalker) | dexyfex | Educational |
+| [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo) | Rich Geldreich | MIT |
+| [stb](https://github.com/nothings/stb) | Sean Barrett | Public Domain |
+| [miniz](https://github.com/richgel999/miniz) | Rich Geldreich | MIT |
+
+Special thanks to **ook3d** for WTD support.
+
+---
 
 ## License
 
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of - Big objects auto divider and converter with non embedd collision
-- Auto Ambient Occlusion
- be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the [GNU General Public License](./LICENSE) for more details.
+This program is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License v3** as published by the Free Software Foundation.
+
+This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the [GNU General Public License](./LICENSE) for more details.
 
 You should have received a copy of the GNU General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
