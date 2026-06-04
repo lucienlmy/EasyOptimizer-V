@@ -135,11 +135,126 @@ static uint8_t *rsc7_decompress(const uint8_t *compressed, size_t comp_size,
     return out;
 }
 
+/* ── Write helpers + RSC7 (re)build for save ──────────────────────── */
+
+static inline void wr16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); }
+static inline void wr32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+static inline void wr64(uint8_t *p, uint64_t v) { memcpy(p, &v, 8); }
+
+static uint32_t format_to_dx9(TexFormat fmt) {
+    switch (fmt) {
+        case TEX_FMT_BC1:      return FOURCC_DXT1;
+        case TEX_FMT_BC2:      return FOURCC_DXT3;
+        case TEX_FMT_BC3:      return FOURCC_DXT5;
+        case TEX_FMT_BC4:      return FOURCC_ATI1;
+        case TEX_FMT_BC5:      return FOURCC_ATI2;
+        case TEX_FMT_BC7:      return FOURCC_BC7;
+        case TEX_FMT_A8R8G8B8: return 21;
+        case TEX_FMT_A8:       return 28;
+        case TEX_FMT_B5G5R5A1: return 25;
+        case TEX_FMT_B5G6R5:   return 23;
+        case TEX_FMT_R8:       return 50;
+        default:               return 0;
+    }
+}
+
+/* RSC7 page-flag encoding from a segment size (same scheme as ytd.c). */
+/* See ytd.c for the rationale: keep the declared page (chunk) count small so it
+ * never overflows the loader's fixed 128-entry chunk array (which manifests as
+ * "address is neither virtual nor physical"). Pick the base page size that
+ * minimises padding while staying within the chunk budget. */
+#define RSC7_MAX_CHUNKS 128
+
+static uint32_t rsc7_flags_from_size(size_t size, int version) {
+    if (size == 0) return (uint32_t)((version & 0xF) << 28);
+    static const int caps[]    = {1, 3, 15, 63, 127, 1, 1, 1, 1};
+    static const int weights[] = {256, 128, 64, 32, 16, 8, 4, 2, 1};
+
+    int    best_shift     = -1;
+    size_t best_pad       = (size_t)-1;
+    int    best_chunks    = 1 << 30;
+    int    best_counts[9] = {0};
+
+    for (int pass = 0; pass < 2 && best_shift < 0; pass++) {
+        int chunk_cap = (pass == 0) ? (RSC7_MAX_CHUNKS / 2) : RSC7_MAX_CHUNKS;
+        for (int base_shift = 0; base_shift <= 0xF; base_shift++) {
+            size_t block_size  = (size_t)0x200 << base_shift;
+            size_t rounded     = (size + block_size - 1) & ~(block_size - 1);
+            size_t block_count = rounded / block_size;
+            int counts[9] = {0};
+            size_t remaining = block_count;
+            for (int i = 0; i < 9; i++) {
+                int take = (int)(remaining / weights[i]);
+                if (take > caps[i]) take = caps[i];
+                counts[i] = take;
+                remaining -= (size_t)take * weights[i];
+            }
+            if (remaining != 0) continue;
+            int chunks = 0;
+            for (int i = 0; i < 9; i++) chunks += counts[i];
+            if (chunks > chunk_cap) continue;
+            if (best_shift < 0 || rounded < best_pad ||
+                (rounded == best_pad && chunks < best_chunks)) {
+                best_shift = base_shift; best_pad = rounded; best_chunks = chunks;
+                for (int i = 0; i < 9; i++) best_counts[i] = counts[i];
+            }
+        }
+    }
+    if (best_shift < 0) return (uint32_t)((version & 0xF) << 28);
+
+    uint32_t f = 0;
+    f |= (uint32_t)((version & 0xF) << 28);
+    f |= (uint32_t)((best_counts[8] & 1)    << 27);
+    f |= (uint32_t)((best_counts[7] & 1)    << 26);
+    f |= (uint32_t)((best_counts[6] & 1)    << 25);
+    f |= (uint32_t)((best_counts[5] & 1)    << 24);
+    f |= (uint32_t)((best_counts[4] & 0x7F) << 17);
+    f |= (uint32_t)((best_counts[3] & 0x3F) << 11);
+    f |= (uint32_t)((best_counts[2] & 0xF)  << 7);
+    f |= (uint32_t)((best_counts[1] & 0x3)  << 5);
+    f |= (uint32_t)((best_counts[0] & 0x1)  << 4);
+    f |= (uint32_t)(best_shift & 0xF);
+    return f;
+}
+
+static uint8_t *rsc7_compress(const uint8_t *data, size_t data_size, size_t *out_size) {
+    size_t buf_size = data_size + (data_size / 8) + 256;
+    uint8_t *out = (uint8_t *)malloc(buf_size);
+    if (!out) return NULL;
+    mz_stream stream;
+    memset(&stream, 0, sizeof(stream));
+    stream.next_in = data;
+    stream.avail_in = (unsigned int)data_size;
+    stream.next_out = out;
+    stream.avail_out = (unsigned int)buf_size;
+    if (mz_deflateInit2(&stream, MZ_BEST_COMPRESSION, MZ_DEFLATED,
+                        -MZ_DEFAULT_WINDOW_BITS, 9, MZ_DEFAULT_STRATEGY) != MZ_OK) {
+        free(out); return NULL;
+    }
+    if (mz_deflate(&stream, MZ_FINISH) != MZ_STREAM_END) {
+        mz_deflateEnd(&stream); free(out); return NULL;
+    }
+    *out_size = stream.total_out;
+    mz_deflateEnd(&stream);
+    return out;
+}
+
+/* Retained original RSC7 payload + texture entry locations for write-back. */
+typedef struct {
+    uint8_t *vdata; size_t vsize;   /* system/virtual segment */
+    uint8_t *pdata; size_t psize;   /* graphics/physical segment */
+    uint32_t version;
+    int      count;                 /* number of mapped texture entries (== texture_count) */
+    size_t  *tex_off;               /* entry offset in vdata per texture */
+    size_t  *data_off;              /* original data offset in pdata per texture */
+} ModelMeta;
+
 /* ── Parse texture dictionary from decompressed RSC7 data ─────────── */
 
 static int parse_texdict(const uint8_t *vdata, size_t vdata_len,
                          const uint8_t *pdata, size_t pdata_len,
-                         uint64_t dict_ptr, TextureEntry *out_textures, int max_textures) {
+                         uint64_t dict_ptr, TextureEntry *out_textures, int max_textures,
+                         size_t *out_tex_off, size_t *out_data_off) {
     if (dict_ptr == 0) return 0;
 
     size_t dict_off = (size_t)(dict_ptr - VIRTUAL_BASE);
@@ -206,6 +321,8 @@ static int parse_texdict(const uint8_t *vdata, size_t vdata_len,
             free(name);
             continue;
         }
+        if (out_tex_off)  out_tex_off[loaded]  = tex_off;   /* entry offset in vdata */
+        if (out_data_off) out_data_off[loaded] = phys_off;  /* data offset in pdata  */
         free(name);
         loaded++;
     }
@@ -289,9 +406,13 @@ YtdFile *ydr_load(const wchar_t *filepath) {
     bool is_ydd = (ext && _wcsicmp(ext, L".ydd") == 0);
     /* YDR is default */
 
-    /* Allocate temp buffer for textures */
+    /* Allocate temp buffer for textures + parallel entry-offset arrays */
     TextureEntry *temp_textures = (TextureEntry *)calloc(EO_MAX_TEXTURES, sizeof(TextureEntry));
-    if (!temp_textures) { free(payload); return NULL; }
+    size_t *temp_tex_off  = (size_t *)calloc(EO_MAX_TEXTURES, sizeof(size_t));
+    size_t *temp_data_off = (size_t *)calloc(EO_MAX_TEXTURES, sizeof(size_t));
+    if (!temp_textures || !temp_tex_off || !temp_data_off) {
+        free(temp_textures); free(temp_tex_off); free(temp_data_off); free(payload); return NULL;
+    }
     int total_loaded = 0;
 
     if (is_ydd) {
@@ -312,7 +433,9 @@ YtdFile *ydr_load(const wchar_t *filepath) {
                     if (td) {
                         int n = parse_texdict(vdata, vdata_len, pdata, pdata_len,
                                               td, temp_textures + total_loaded,
-                                              EO_MAX_TEXTURES - total_loaded);
+                                              EO_MAX_TEXTURES - total_loaded,
+                                              temp_tex_off + total_loaded,
+                                              temp_data_off + total_loaded);
                         total_loaded += n;
                     }
                 }
@@ -327,7 +450,8 @@ YtdFile *ydr_load(const wchar_t *filepath) {
             uint64_t td = find_shader_group_texdict(vdata, vdata_len, draw_ptr);
             if (td) {
                 total_loaded = parse_texdict(vdata, vdata_len, pdata, pdata_len,
-                                             td, temp_textures, EO_MAX_TEXTURES);
+                                             td, temp_textures, EO_MAX_TEXTURES,
+                                             temp_tex_off, temp_data_off);
             }
         }
     } else {
@@ -335,36 +459,59 @@ YtdFile *ydr_load(const wchar_t *filepath) {
         uint64_t td = find_shader_group_texdict(vdata, vdata_len, VIRTUAL_BASE);
         if (td) {
             total_loaded = parse_texdict(vdata, vdata_len, pdata, pdata_len,
-                                         td, temp_textures, EO_MAX_TEXTURES);
+                                         td, temp_textures, EO_MAX_TEXTURES,
+                                         temp_tex_off, temp_data_off);
         }
     }
-
-    free(payload);
 
     if (total_loaded == 0) {
         LOG("ydr_load: no embedded textures found");
         SET_LOAD_ERR("no embedded textures (model has no texture dictionary)");
-        free(temp_textures);
+        free(payload); free(temp_textures); free(temp_tex_off); free(temp_data_off);
         return NULL;
     }
 
     /* Build YtdFile from extracted textures */
     YtdFile *ytd = (YtdFile *)calloc(1, sizeof(YtdFile));
-    if (!ytd) { 
+    if (!ytd) {
         for (int i = 0; i < total_loaded; i++) free(temp_textures[i].data);
-        free(temp_textures); 
-        return NULL; 
+        free(temp_textures); free(temp_tex_off); free(temp_data_off); free(payload);
+        return NULL;
     }
     ytd->type = ARCHIVE_MODEL_READONLY;
     ytd->textures = (TextureEntry *)calloc(total_loaded, sizeof(TextureEntry));
     if (!ytd->textures) {
         for (int i = 0; i < total_loaded; i++) free(temp_textures[i].data);
-        free(temp_textures);
+        free(temp_textures); free(temp_tex_off); free(temp_data_off); free(payload);
         free(ytd);
         return NULL;
     }
     memcpy(ytd->textures, temp_textures, total_loaded * sizeof(TextureEntry));
     ytd->texture_count = total_loaded;
+
+    /* Retain the original RSC7 payload + entry offsets so the model can be
+     * recomposed on save (ydr_save). */
+    ModelMeta *mm = (ModelMeta *)calloc(1, sizeof(ModelMeta));
+    if (mm) {
+        mm->tex_off  = (size_t *)malloc(total_loaded * sizeof(size_t));
+        mm->data_off = (size_t *)malloc(total_loaded * sizeof(size_t));
+        if (mm->tex_off && mm->data_off) {
+            mm->vdata = payload;            /* owns the whole decompressed buffer */
+            mm->vsize = sys_size;
+            mm->pdata = payload + sys_size;
+            mm->psize = gfx_size;
+            mm->version = version;
+            mm->count = total_loaded;
+            memcpy(mm->tex_off,  temp_tex_off,  total_loaded * sizeof(size_t));
+            memcpy(mm->data_off, temp_data_off, total_loaded * sizeof(size_t));
+            ytd->model_meta = mm;
+        } else {
+            free(mm->tex_off); free(mm->data_off); free(mm);
+            free(payload);     /* no meta: write-back unavailable, behaves read-only */
+        }
+    } else {
+        free(payload);
+    }
 
     const wchar_t *wfname = wcsrchr(filepath, L'\\');
     if (!wfname) wfname = wcsrchr(filepath, L'/');
@@ -373,7 +520,131 @@ YtdFile *ydr_load(const wchar_t *filepath) {
     wcsncpy(ytd->file_path, filepath, EO_MAX_PATH - 1);
     ytd->file_path[EO_MAX_PATH - 1] = 0;
 
-    free(temp_textures);
+    free(temp_textures); free(temp_tex_off); free(temp_data_off);
     LOG("ydr_load: loaded %d embedded textures from '%s'", total_loaded, ytd->name);
     return ytd;
+}
+
+/* ── Write-back: recompose YDR/YFT/YDD ────────────────────────────── */
+
+void ydr_free_model_meta(YtdFile *archive) {
+    if (!archive || !archive->model_meta) return;
+    ModelMeta *mm = (ModelMeta *)archive->model_meta;
+    free(mm->vdata);          /* the whole payload (vdata == start, pdata is inside) */
+    free(mm->tex_off);
+    free(mm->data_off);
+    free(mm);
+    archive->model_meta = NULL;
+}
+
+bool ydr_save(YtdFile *archive, const wchar_t *filepath) {
+    if (!archive || !archive->model_meta) {
+        SET_LOAD_ERR("model has no retained payload to recompose");
+        return false;
+    }
+    ModelMeta *mm = (ModelMeta *)archive->model_meta;
+    if (mm->count != archive->texture_count) {
+        SET_LOAD_ERR("texture count changed; cannot recompose model");
+        return false;
+    }
+
+    /* Work on a mutable copy of the system segment (entries get patched). */
+    uint8_t *vbuf = (uint8_t *)malloc(mm->vsize);
+    if (!vbuf) { SET_LOAD_ERR("out of memory"); return false; }
+    memcpy(vbuf, mm->vdata, mm->vsize);
+
+    /* Graphics segment starts as the original; changed textures are appended. */
+    size_t pcap = mm->psize + 1024;
+    size_t pcursor = mm->psize;        /* append point */
+    uint8_t *pbuf = (uint8_t *)malloc(pcap);
+    if (!pbuf) { free(vbuf); SET_LOAD_ERR("out of memory"); return false; }
+    memcpy(pbuf, mm->pdata, mm->psize);
+
+    for (int i = 0; i < mm->count; i++) {
+        TextureEntry *te = &archive->textures[i];
+        size_t off = mm->tex_off[i];
+        if (off + GTAV_TEX_SIZE > mm->vsize) continue;
+
+        /* Patch entry fields (dims / stride / format / mips). */
+        wr16(vbuf + off + 0x50, (uint16_t)te->width);
+        wr16(vbuf + off + 0x52, (uint16_t)te->height);
+        wr16(vbuf + off + 0x56, (uint16_t)tex_row_pitch(te->width, te->format));
+        wr32(vbuf + off + 0x58, format_to_dx9(te->format));
+        vbuf[off + 0x5D] = (uint8_t)te->mip_count;
+
+        /* Decide where the texture data lives. */
+        size_t orig_size = 0;
+        if (te->has_orig)
+            orig_size = tex_total_mip_size(te->orig_width, te->orig_height, te->orig_format, te->orig_mip_count);
+
+        bool edited = te->has_orig;
+        if (!edited) {
+            /* Unchanged: keep original data pointer/location. */
+            wr64(vbuf + off + 0x70, PHYSICAL_BASE + mm->data_off[i]);
+            continue;
+        }
+
+        if (te->data_size == orig_size && mm->data_off[i] + te->data_size <= mm->psize) {
+            /* Same size: patch in place (structure identical to original). */
+            memcpy(pbuf + mm->data_off[i], te->data, te->data_size);
+            wr64(vbuf + off + 0x70, PHYSICAL_BASE + mm->data_off[i]);
+        } else {
+            /* Different size: append at a 16-aligned offset and repoint. */
+            size_t aligned = (pcursor + 15) & ~(size_t)15;
+            size_t need = aligned + te->data_size;
+            if (need > pcap) {
+                size_t ncap = need + need / 2 + 4096;
+                uint8_t *np = (uint8_t *)realloc(pbuf, ncap);
+                if (!np) { free(vbuf); free(pbuf); SET_LOAD_ERR("out of memory growing graphics segment"); return false; }
+                pbuf = np; pcap = ncap;
+            }
+            if (aligned > pcursor) memset(pbuf + pcursor, 0, aligned - pcursor);
+            memcpy(pbuf + aligned, te->data, te->data_size);
+            wr64(vbuf + off + 0x70, PHYSICAL_BASE + aligned);
+            pcursor = aligned + te->data_size;
+        }
+    }
+
+    size_t new_psize = pcursor;
+
+    /* Recompute page flags and pad each segment up to its flag-encoded size. */
+    uint32_t sys_flags = rsc7_flags_from_size(mm->vsize, mm->version);
+    uint32_t gfx_flags = rsc7_flags_from_size(new_psize, mm->version);
+    size_t sys_target = rsc7_size_from_flags(sys_flags);
+    size_t gfx_target = rsc7_size_from_flags(gfx_flags);
+
+    uint8_t *vpad = (uint8_t *)calloc(1, sys_target ? sys_target : 1);
+    uint8_t *ppad = (uint8_t *)calloc(1, gfx_target ? gfx_target : 1);
+    if (!vpad || !ppad) { free(vbuf); free(pbuf); free(vpad); free(ppad); SET_LOAD_ERR("out of memory"); return false; }
+    memcpy(vpad, vbuf, mm->vsize <= sys_target ? mm->vsize : sys_target);
+    memcpy(ppad, pbuf, new_psize <= gfx_target ? new_psize : gfx_target);
+    free(vbuf); free(pbuf);
+
+    /* Concatenate, compress, write RSC7 header. */
+    size_t combined_size = sys_target + gfx_target;
+    uint8_t *combined = (uint8_t *)malloc(combined_size ? combined_size : 1);
+    if (!combined) { free(vpad); free(ppad); SET_LOAD_ERR("out of memory"); return false; }
+    memcpy(combined, vpad, sys_target);
+    memcpy(combined + sys_target, ppad, gfx_target);
+    free(vpad); free(ppad);
+
+    size_t comp_size = 0;
+    uint8_t *comp = rsc7_compress(combined, combined_size, &comp_size);
+    free(combined);
+    if (!comp) { SET_LOAD_ERR("RSC7 compression failed"); return false; }
+
+    FILE *f = _wfopen(filepath, L"wb");
+    if (!f) { free(comp); SET_LOAD_ERR("could not open output file for writing"); return false; }
+    uint8_t header[16];
+    wr32(header + 0, RSC7_MAGIC);
+    wr32(header + 4, mm->version);
+    wr32(header + 8, sys_flags);
+    wr32(header + 12, gfx_flags);
+    bool ok = fwrite(header, 1, 16, f) == 16 && fwrite(comp, 1, comp_size, f) == comp_size;
+    fclose(f);
+    free(comp);
+    if (!ok) { SET_LOAD_ERR("failed writing model file"); return false; }
+
+    LOG("ydr_save: recomposed '%ls' (sys=%zu gfx=%zu)", filepath, sys_target, gfx_target);
+    return true;
 }

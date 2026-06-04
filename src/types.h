@@ -77,6 +77,7 @@ typedef struct ArchiveFile {
     uint32_t sys_flags;
     uint32_t gfx_flags;
     void *wtd_meta;
+    void *model_meta;      /* ydr.c ModelMeta: original RSC7 payload for YDR/YDD/YFT write-back */
 } ArchiveFile;
 
 typedef ArchiveFile YtdFile;

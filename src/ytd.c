@@ -93,45 +93,67 @@ static size_t rsc7_size_from_flags(uint32_t flags) {
     return base_size * (s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8);
 }
 
+/* Max pages (chunks) a resource may declare. The game/CodeWalker/rageAm store
+ * virtual+physical chunks in a single fixed array of PG_MAX_CHUNKS entries; a
+ * resource that declares more overflows it and is rejected with
+ * "address is neither virtual nor physical". We therefore must pick a base page
+ * size large enough to keep the chunk count small (real files use few, large
+ * pages). To leave room for the other segment we cap each segment at half. */
+#define RSC7_MAX_CHUNKS 128
+
 static uint32_t rsc7_flags_from_size(size_t size, int version) {
     if (size == 0) return (uint32_t)((version & 0xF) << 28);
-    size_t block_size = 0x200;
-    while (1) {
-        size_t rounded = (size + block_size - 1) & ~(block_size - 1);
-        size_t block_count = rounded / block_size;
-        int base_shift = 0;
-        size_t bs = block_size;
-        while (bs > 0x200) { base_shift++; bs >>= 1; }
+    static const int caps[]    = {1, 3, 15, 63, 127, 1, 1, 1, 1};
+    static const int weights[] = {256, 128, 64, 32, 16, 8, 4, 2, 1};
 
-        static const int caps[] = {1, 3, 15, 63, 127, 1, 1, 1, 1};
-        static const int weights[] = {256, 128, 64, 32, 16, 8, 4, 2, 1};
-        int counts[9] = {0};
-        size_t remaining = block_count;
-        bool ok = true;
-        for (int i = 0; i < 9; i++) {
-            int take = (int)(remaining / weights[i]);
-            if (take > caps[i]) take = caps[i];
-            counts[i] = take;
-            remaining -= (size_t)take * weights[i];
+    int    best_shift     = -1;
+    size_t best_pad       = (size_t)-1;
+    int    best_chunks    = 1 << 30;
+    int    best_counts[9] = {0};
+
+    /* pass 0: keep each segment under half the limit (so virtual+physical fit);
+     * pass 1: relax to the full limit only if nothing qualified. */
+    for (int pass = 0; pass < 2 && best_shift < 0; pass++) {
+        int chunk_cap = (pass == 0) ? (RSC7_MAX_CHUNKS / 2) : RSC7_MAX_CHUNKS;
+        for (int base_shift = 0; base_shift <= 0xF; base_shift++) {
+            size_t block_size  = (size_t)0x200 << base_shift;
+            size_t rounded     = (size + block_size - 1) & ~(block_size - 1);
+            size_t block_count = rounded / block_size;
+            int counts[9] = {0};
+            size_t remaining = block_count;
+            for (int i = 0; i < 9; i++) {
+                int take = (int)(remaining / weights[i]);
+                if (take > caps[i]) take = caps[i];
+                counts[i] = take;
+                remaining -= (size_t)take * weights[i];
+            }
+            if (remaining != 0) continue;          /* not representable here */
+            int chunks = 0;
+            for (int i = 0; i < 9; i++) chunks += counts[i];
+            if (chunks > chunk_cap) continue;      /* would overflow chunk array */
+            /* prefer least padding, tie-break fewest chunks */
+            if (best_shift < 0 || rounded < best_pad ||
+                (rounded == best_pad && chunks < best_chunks)) {
+                best_shift = base_shift; best_pad = rounded; best_chunks = chunks;
+                for (int i = 0; i < 9; i++) best_counts[i] = counts[i];
+            }
         }
-        if (remaining == 0) {
-            uint32_t f = 0;
-            f |= (uint32_t)((version & 0xF) << 28);
-            f |= (uint32_t)((counts[8] & 1) << 27);
-            f |= (uint32_t)((counts[7] & 1) << 26);
-            f |= (uint32_t)((counts[6] & 1) << 25);
-            f |= (uint32_t)((counts[5] & 1) << 24);
-            f |= (uint32_t)((counts[4] & 0x7F) << 17);
-            f |= (uint32_t)((counts[3] & 0x3F) << 11);
-            f |= (uint32_t)((counts[2] & 0xF) << 7);
-            f |= (uint32_t)((counts[1] & 0x3) << 5);
-            f |= (uint32_t)((counts[0] & 0x1) << 4);
-            f |= (uint32_t)(base_shift & 0xF);
-            return f;
-        }
-        block_size <<= 1;
-        if (block_size > ((size_t)0x200 << 0xF)) return (uint32_t)((version & 0xF) << 28);
     }
+    if (best_shift < 0) return (uint32_t)((version & 0xF) << 28);
+
+    uint32_t f = 0;
+    f |= (uint32_t)((version & 0xF) << 28);
+    f |= (uint32_t)((best_counts[8] & 1)    << 27);
+    f |= (uint32_t)((best_counts[7] & 1)    << 26);
+    f |= (uint32_t)((best_counts[6] & 1)    << 25);
+    f |= (uint32_t)((best_counts[5] & 1)    << 24);
+    f |= (uint32_t)((best_counts[4] & 0x7F) << 17);
+    f |= (uint32_t)((best_counts[3] & 0x3F) << 11);
+    f |= (uint32_t)((best_counts[2] & 0xF)  << 7);
+    f |= (uint32_t)((best_counts[1] & 0x3)  << 5);
+    f |= (uint32_t)((best_counts[0] & 0x1)  << 4);
+    f |= (uint32_t)(best_shift & 0xF);
+    return f;
 }
 
 /* ── DX9 format mapping ────────────────────────────────────────────── */
@@ -584,6 +606,10 @@ void ytd_free(YtdFile *ytd) {
         extern void wtd_free(YtdFile *wtd);
         wtd_free(ytd);
         return;
+    }
+    if (ytd->model_meta) {
+        extern void ydr_free_model_meta(YtdFile *archive);
+        ydr_free_model_meta(ytd);
     }
     for (int i = 0; i < ytd->texture_count; i++) {
         free(ytd->textures[i].data);

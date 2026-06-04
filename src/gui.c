@@ -1179,6 +1179,9 @@ static bool ensure_ng_keys_for_rpf(void) {
 
 static bool save_archive_to_path(YtdFile *archive, const wchar_t *path) {
     if (archive->type == ARCHIVE_WTD) return wtd_save(archive, path);
+    /* YDR/YFT/YDD with a retained payload are recomposed back into the model. */
+    if (archive->type == ARCHIVE_MODEL_READONLY && archive->model_meta)
+        return ydr_save(archive, path);
     return ytd_save(archive, path);
 }
 
@@ -1240,7 +1243,9 @@ static void build_export_path(YtdFile *archive, const wchar_t *folder,
     }
     _snwprintf(output, output_count, L"%s\\%s", folder, rel);
     output[output_count - 1] = 0;
-    if (archive->type == ARCHIVE_MODEL_READONLY)
+    /* Models with a retained payload are recomposed in place (keep .ydr/.yft/.ydd);
+     * only fall back to a .ytd sidecar when no payload is available. */
+    if (archive->type == ARCHIVE_MODEL_READONLY && !archive->model_meta)
         PathRenameExtensionW(output, L".ytd");
 }
 
