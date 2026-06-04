@@ -43,6 +43,10 @@ if exist "ng.dat" copy /Y "ng.dat" "build\ng.dat" >nul
 if exist "lut.dat" copy /Y "lut.dat" "build\lut.dat" >nul
 if exist "gtav_key_hashes.dat" copy /Y "gtav_key_hashes.dat" "build\gtav_key_hashes.dat" >nul
 
+echo [BUILD] Compiling resources...
+rc /nologo /I res /fo res\app.res res\app.rc
+if errorlevel 1 goto :fail
+
 set COMMON=/nologo /O2 /W3 /MD /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS
 set CFLAGS=%COMMON% /I vendor\bc7enc_rdo
 set CXXFLAGS=%COMMON% /EHsc /std:c++14 /DSUPPORT_BC7E=1

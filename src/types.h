@@ -67,10 +67,12 @@ typedef struct ArchiveFile {
     bool expanded;
     bool is_preview;      /* consolidated YTD shown as migration preview, not yet committed */
     bool keep_originals;  /* preview only: if set, commit keeps the source textures in originals */
-    bool from_rpf;         /* loaded from inside an RPF; unload only, never written back to the container */
+    bool from_rpf;         /* loaded from inside an RPF; edits are exported with container metadata */
     bool is_rpf_group;     /* visual parent for entries discovered inside one RPF */
     struct ArchiveFile *rpf_parent;
     int rpf_child_count;
+    wchar_t rpf_source_path[EO_MAX_PATH];
+    wchar_t rpf_entry_path[EO_MAX_PATH];
     
     uint32_t sys_flags;
     uint32_t gfx_flags;

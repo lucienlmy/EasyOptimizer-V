@@ -13,6 +13,7 @@
 #include "rpf_scan.h"
 #include "keygen.h"
 #include "log.h"
+#include "resource.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -498,10 +499,18 @@ void gui_init(HINSTANCE hInst) {
     theme_init();
     update_sidebar_labels();
 
+    HICON app_icon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
+    HICON app_icon_sm = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+                                          GetSystemMetrics(SM_CXSMICON),
+                                          GetSystemMetrics(SM_CYSMICON), 0);
+    if (!app_icon_sm) app_icon_sm = app_icon;
+
     WNDCLASSEXW wc = {sizeof(wc)};
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = MainWndProc;
     wc.hInstance = hInst;
+    wc.hIcon = app_icon;
+    wc.hIconSm = app_icon_sm;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = CreateSolidBrush(CLR_BG_DARK);
     wc.lpszClassName = L"EasyOptimizerMain";
@@ -528,6 +537,10 @@ void gui_init(HINSTANCE hInst) {
     g_app.hwnd_main = CreateWindowExW(0, L"EasyOptimizerMain", L"EasyOptimizer-V by LN-Development",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1100, 768,
         NULL, NULL, hInst, NULL);
+    if (g_app.hwnd_main && app_icon) {
+        SendMessageW(g_app.hwnd_main, WM_SETICON, ICON_BIG, (LPARAM)app_icon);
+        SendMessageW(g_app.hwnd_main, WM_SETICON, ICON_SMALL, (LPARAM)app_icon_sm);
+    }
 
     g_app.hwnd_header = CreateWindowExW(0, L"STATIC", NULL,
         WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, 0, 0, 100, HEADER_HEIGHT,
@@ -896,11 +909,15 @@ static bool import_rpf_entry(const wchar_t *entry_path, const uint8_t *data,
 
     const wchar_t *leaf = embedded_file_name(entry_path);
     WideCharToMultiByte(CP_UTF8, 0, leaf, -1, archive->name, EO_MAX_NAME, NULL, NULL);
-    wcsncpy(archive->file_path, leaf, EO_MAX_PATH - 1);
+    wcsncpy(archive->file_path, entry_path, EO_MAX_PATH - 1);
     archive->file_path[EO_MAX_PATH - 1] = 0;
     archive->type = ARCHIVE_MODEL_READONLY;
     archive->from_rpf = true;
     archive->rpf_parent = ctx->parent;
+    wcsncpy(archive->rpf_source_path, ctx->rpf_path, EO_MAX_PATH - 1);
+    archive->rpf_source_path[EO_MAX_PATH - 1] = 0;
+    wcsncpy(archive->rpf_entry_path, entry_path, EO_MAX_PATH - 1);
+    archive->rpf_entry_path[EO_MAX_PATH - 1] = 0;
     archive->expanded = false;
     g_app.ytds[g_app.ytd_count++] = archive;
     LOG("RPF import: listed embedded %ls from %ls", entry_path, ctx->rpf_path);
@@ -1165,6 +1182,68 @@ static bool save_archive_to_path(YtdFile *archive, const wchar_t *path) {
     return ytd_save(archive, path);
 }
 
+static void normalize_relative_path(wchar_t *path) {
+    for (wchar_t *p = path; *p; p++) {
+        if (*p == L'/') *p = L'\\';
+        if (*p == L':' || *p == L'*' || *p == L'?' || *p == L'"' ||
+            *p == L'<' || *p == L'>' || *p == L'|')
+            *p = L'_';
+    }
+}
+
+static bool ensure_parent_dirs(const wchar_t *path) {
+    wchar_t tmp[MAX_PATH];
+    wcsncpy(tmp, path, MAX_PATH - 1);
+    tmp[MAX_PATH - 1] = 0;
+    PathRemoveFileSpecW(tmp);
+    if (!tmp[0] || PathFileExistsW(tmp)) return true;
+
+    wchar_t partial[MAX_PATH] = {0};
+    const wchar_t *p = tmp;
+    if (p[0] && p[1] == L':') {
+        partial[0] = p[0];
+        partial[1] = p[1];
+        partial[2] = L'\\';
+        partial[3] = 0;
+        p += 3;
+    }
+    while (*p) {
+        const wchar_t *slash = wcschr(p, L'\\');
+        size_t len = slash ? (size_t)(slash - p) : wcslen(p);
+        if (len > 0) {
+            if (partial[0] && partial[wcslen(partial) - 1] != L'\\')
+                wcsncat(partial, L"\\", MAX_PATH - wcslen(partial) - 1);
+            size_t room = MAX_PATH - wcslen(partial) - 1;
+            size_t chunk = len < room ? len : room;
+            wcsncat(partial, p, chunk);
+            if (!CreateDirectoryW(partial, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+                return false;
+        }
+        if (!slash) break;
+        p = slash + 1;
+    }
+    return true;
+}
+
+static void build_export_path(YtdFile *archive, const wchar_t *folder,
+                              wchar_t *output, size_t output_count) {
+    wchar_t rel[EO_MAX_PATH];
+    if (archive->from_rpf) {
+        const wchar_t *entry_path = archive->rpf_entry_path[0] ? archive->rpf_entry_path : archive->file_path;
+        wcsncpy(rel, entry_path, EO_MAX_PATH - 1);
+        rel[EO_MAX_PATH - 1] = 0;
+        normalize_relative_path(rel);
+    } else {
+        const wchar_t *filename = PathFindFileNameW(archive->file_path);
+        wcsncpy(rel, filename, EO_MAX_PATH - 1);
+        rel[EO_MAX_PATH - 1] = 0;
+    }
+    _snwprintf(output, output_count, L"%s\\%s", folder, rel);
+    output[output_count - 1] = 0;
+    if (archive->type == ARCHIVE_MODEL_READONLY)
+        PathRenameExtensionW(output, L".ytd");
+}
+
 static int save_archives_to_folder(const wchar_t *folder, int *out_skipped) {
     int saved = 0;
     int skipped = 0;
@@ -1172,12 +1251,12 @@ static int save_archives_to_folder(const wchar_t *folder, int *out_skipped) {
         YtdFile *archive = g_app.ytds[i];
         if (archive->is_rpf_group) continue;
         if (archive->is_preview) continue;   /* uncommitted migration preview */
-        const wchar_t *filename = PathFindFileNameW(archive->file_path);
         wchar_t output[MAX_PATH];
-        _snwprintf(output, MAX_PATH, L"%s\\%s", folder, filename);
-        output[MAX_PATH - 1] = 0;
-        if (archive->type == ARCHIVE_MODEL_READONLY)
-            PathRenameExtensionW(output, L".ytd");
+        build_export_path(archive, folder, output, MAX_PATH);
+        if (!ensure_parent_dirs(output)) {
+            skipped++;
+            continue;
+        }
         if (PathFileExistsW(output)) {
             wchar_t base[MAX_PATH];
             wchar_t extension[32];
@@ -1192,8 +1271,13 @@ static int save_archives_to_folder(const wchar_t *folder, int *out_skipped) {
                 if (!PathFileExistsW(output)) break;
             }
         }
-        if (save_archive_to_path(archive, output)) saved++;
-        else skipped++;
+        if (save_archive_to_path(archive, output)) {
+            saved++;
+            if (archive->from_rpf || archive->type == ARCHIVE_MODEL_READONLY)
+                LOG("Saved read-only export: %ls", output);
+        } else {
+            skipped++;
+        }
     }
     if (out_skipped) *out_skipped = skipped;
     return saved;
@@ -1263,7 +1347,7 @@ static void save_all(void) {
     dialog.pszMainInstruction = trw(L"Choose how to save the modified files",
         L"Escolha como salvar os arquivos modificados", L"Elija cómo guardar los archivos modificados",
         L"Выберите способ сохранения измененных файлов");
-    dialog.pszContent = trw(L"Project cache snapshots are stored next to the executable.",
+    dialog.pszContent = trw(L"Project cache snapshots are stored next to the executable. RPF/model entries are exported as .ytd sidecars; the original container/model is not repacked yet.",
         L"Snapshots do cache ficam ao lado do executável.", L"Las instantáneas de caché se guardan junto al ejecutable.",
         L"Снимки кэша проекта хранятся рядом с исполняемым файлом.");
     dialog.cButtons = ARRAYSIZE(buttons);
@@ -1302,7 +1386,29 @@ static void save_all(void) {
             if (archive->is_rpf_group) continue;
             if (archive->is_preview) continue;   /* uncommitted migration preview */
             if (archive->type == ARCHIVE_MODEL_READONLY) {
-                skipped++;
+                wchar_t output[MAX_PATH];
+                if (archive->from_rpf && archive->rpf_parent) {
+                    wchar_t folder[MAX_PATH];
+                    wcsncpy(folder, archive->rpf_parent->file_path, MAX_PATH - 1);
+                    folder[MAX_PATH - 1] = 0;
+                    PathRemoveExtensionW(folder);
+                    wcsncat(folder, L"_EasyOptimizer_exports", MAX_PATH - wcslen(folder) - 1);
+                    build_export_path(archive, folder, output, MAX_PATH);
+                } else {
+                    wcsncpy(output, archive->file_path, MAX_PATH - 1);
+                    output[MAX_PATH - 1] = 0;
+                    PathRenameExtensionW(output, L".ytd");
+                }
+                if (!ensure_parent_dirs(output)) {
+                    skipped++;
+                    continue;
+                }
+                if (save_archive_to_path(archive, output)) {
+                    saved++;
+                    LOG("Saved read-only sidecar export: %ls", output);
+                } else {
+                    skipped++;
+                }
                 continue;
             }
             if (save_archive_to_path(archive, archive->file_path)) saved++;
