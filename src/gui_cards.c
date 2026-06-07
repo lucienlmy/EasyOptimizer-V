@@ -113,6 +113,26 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd,
         DrawTextW(hdc, L"Unload", -1, &btn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
+    /* "DDS" export button (every regular/file card with textures), placed next
+     * to the Unload slot. Exports all of this archive's textures to a folder. */
+    if (!ytd->is_preview && !ytd->is_rpf_group && ytd->texture_count > 0) {
+        int ddr = ytd->from_rpf ? (w - 124) : (w - 44);
+        int ddl = ddr - 56;
+        RECT db = {x + ddl, y + 16, x + ddr, y + 40};
+        HBRUSH dfill = CreateSolidBrush(RGB(40, 96, 64));
+        HPEN dpen = CreatePen(PS_SOLID, 1, RGB(80, 170, 120));
+        HPEN oldP = (HPEN)SelectObject(hdc, dpen);
+        HBRUSH oldB = (HBRUSH)SelectObject(hdc, dfill);
+        RoundRect(hdc, db.left, db.top, db.right, db.bottom, 6, 6);
+        SelectObject(hdc, oldP);
+        SelectObject(hdc, oldB);
+        DeleteObject(dpen);
+        DeleteObject(dfill);
+        SetTextColor(hdc, CLR_TEXT_PRIMARY);
+        SelectObject(hdc, theme_font_small_bold());
+        DrawTextW(hdc, L"DDS", -1, &db, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
     /* Expand arrow */
     SetTextColor(hdc, CLR_TEXT_PRIMARY);
     SelectObject(hdc, theme_font_title());
@@ -161,6 +181,17 @@ void gui_draw_rpf_entry_row(HDC hdc, int x, int y, int w, YtdFile *ytd) {
     SetTextColor(hdc, CLR_TEXT_PRIMARY);
     SelectObject(hdc, theme_font_small_bold());
     DrawTextW(hdc, L"Unload", -1, &unload, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    /* "DDS" export button, left of Unload. */
+    if (ytd->texture_count > 0) {
+        RECT db = {x + w - 176, y + 9, x + w - 116, y + 33};
+        HBRUSH dfill = CreateSolidBrush(RGB(40, 96, 64));
+        FillRect(hdc, &db, dfill);
+        DeleteObject(dfill);
+        SetTextColor(hdc, CLR_TEXT_PRIMARY);
+        SelectObject(hdc, theme_font_small_bold());
+        DrawTextW(hdc, L"DDS", -1, &db, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
 
     SetTextColor(hdc, CLR_TEXT_PRIMARY);
     SelectObject(hdc, theme_font_title());

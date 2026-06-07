@@ -76,6 +76,7 @@ typedef struct {
 #define IDM_CTX_RESIZE_QRTR  2002
 #define IDM_CTX_RESIZE_CUSTOM 2003
 #define IDM_CTX_EXPORT_DDS   2004
+#define IDM_CTX_EXPORT_DDS_ALL 2007
 #define IDM_CTX_REMOVE       2005
 #define IDM_CTX_UNLOAD       2006
 #define IDM_ARCH_UNLOAD      2007
@@ -130,6 +131,7 @@ static void do_same_format_recompress(void);
 static void choose_recompress_mode(void);
 static void do_custom_resize(int ytd_idx, int tex_idx);
 static void do_texture_export_dds(int ytd_idx, int tex_idx);
+static void do_archive_export_all_dds(int ytd_idx);
 static void do_texture_remove(int ytd_idx, int tex_idx);
 static void do_texture_unload(int ytd_idx, int tex_idx);
 static bool ng_keys_available(void);
@@ -2377,6 +2379,11 @@ static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_CTX_EXPORT_DDS,
         trw(L"Export as DDS...", L"Exportar como DDS...", L"Exportar como DDS...", L"Экспортировать DDS..."));
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_EXPORT_DDS_ALL,
+        trw(L"Export all textures (this file) as DDS...",
+            L"Exportar todas as texturas (este arquivo) como DDS...",
+            L"Exportar todas las texturas (este archivo) como DDS...",
+            L"Экспортировать все текстуры (этот файл) в DDS..."));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     /* Unload (revert) is only meaningful once the texture was edited. */
     AppendMenuW(hMenu, MF_STRING | (tex->has_orig ? MF_ENABLED : (MF_GRAYED | MF_DISABLED)),
@@ -2422,6 +2429,9 @@ static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int
         break;
     case IDM_CTX_EXPORT_DDS:
         do_texture_export_dds(ytd_idx, tex_idx);
+        break;
+    case IDM_CTX_EXPORT_DDS_ALL:
+        do_archive_export_all_dds(ytd_idx);
         break;
     case IDM_CTX_UNLOAD:
         do_texture_unload(ytd_idx, tex_idx);
@@ -2553,6 +2563,76 @@ static void do_texture_export_dds(int ytd_idx, int tex_idx) {
 
     LOG("  exported %zu bytes", dds_size);
     gui_update_status("Exported '%s' (%zu bytes)", tex->name, dds_size);
+}
+
+/* Export every texture of one archive as standalone .dds files into a folder
+ * chosen by the user (i.e. outside the GTA container). */
+static void do_archive_export_all_dds(int ytd_idx) {
+    if (ytd_idx < 0 || ytd_idx >= g_app.ytd_count) return;
+    YtdFile *ytd = g_app.ytds[ytd_idx];
+    if (ytd->is_rpf_group || ytd->texture_count == 0) {
+        gui_update_status("No textures to export");
+        return;
+    }
+
+    wchar_t folder[MAX_PATH];
+    if (!select_folder(g_app.hwnd_main,
+            trw(L"Select folder for DDS export", L"Selecione a pasta para exportar DDS",
+                L"Seleccione la carpeta para exportar DDS", L"Выберите папку для экспорта DDS"),
+            folder, MAX_PATH))
+        return;
+
+    /* Group exports under a subfolder named after the archive. */
+    wchar_t wbase[256];
+    MultiByteToWideChar(CP_UTF8, 0, ytd->name[0] ? ytd->name : "textures", -1, wbase, 256);
+    for (wchar_t *p = wbase; *p; p++)
+        if (*p == L'\\' || *p == L'/' || *p == L':' || *p == L'*' || *p == L'?' ||
+            *p == L'"' || *p == L'<' || *p == L'>' || *p == L'|') *p = L'_';
+    wchar_t outdir[MAX_PATH];
+    _snwprintf(outdir, MAX_PATH, L"%s\\%s_dds", folder, wbase);
+    outdir[MAX_PATH - 1] = 0;
+    CreateDirectoryW(outdir, NULL);
+
+    int exported = 0, failed = 0;
+    for (int i = 0; i < ytd->texture_count; i++) {
+        TextureEntry *tex = &ytd->textures[i];
+        if (!tex->data || tex->data_size == 0) { failed++; continue; }
+
+        wchar_t wname[256];
+        MultiByteToWideChar(CP_UTF8, 0, tex->name[0] ? tex->name : "texture", -1, wname, 256);
+        for (wchar_t *p = wname; *p; p++)
+            if (*p == L'\\' || *p == L'/' || *p == L':' || *p == L'*' || *p == L'?' ||
+                *p == L'"' || *p == L'<' || *p == L'>' || *p == L'|') *p = L'_';
+
+        wchar_t path[MAX_PATH];
+        _snwprintf(path, MAX_PATH, L"%s\\%s.dds", outdir, wname);
+        path[MAX_PATH - 1] = 0;
+        /* Avoid clobbering same-named textures. */
+        if (PathFileExistsW(path)) {
+            for (int s = 2; s < 100000; s++) {
+                _snwprintf(path, MAX_PATH, L"%s\\%s_%d.dds", outdir, wname, s);
+                path[MAX_PATH - 1] = 0;
+                if (!PathFileExistsW(path)) break;
+            }
+        }
+
+        size_t dds_size = 0;
+        uint8_t *dds = dds_build(tex, &dds_size);
+        if (!dds) { failed++; continue; }
+        FILE *f = _wfopen(path, L"wb");
+        if (f) {
+            fwrite(dds, 1, dds_size, f);
+            fclose(f);
+            exported++;
+        } else {
+            failed++;
+        }
+        free(dds);
+    }
+
+    LOG("do_archive_export_all_dds: '%s' -> %d exported, %d failed (%ls)",
+        ytd->name, exported, failed, outdir);
+    gui_update_status("Exported %d DDS textures (%d failed) to %ls", exported, failed, outdir);
 }
 
 static void do_texture_remove(int ytd_idx, int tex_idx) {
@@ -2712,6 +2792,15 @@ static bool handle_archive_header_click(HWND hwnd, int mx, int my, int y,
         int br = area_w - 52, bl = br - 72;
         if (mx >= bl && mx <= br && my >= y + 16 && my <= y + 40) {
             unload_rpf_archive(ytd_idx);
+            return true;
+        }
+    }
+    /* "DDS" export button (mirror of gui_draw_ytd_card geometry). */
+    if (!ytd->is_preview && !ytd->is_rpf_group && ytd->texture_count > 0) {
+        int ddr = ytd->from_rpf ? (area_w - 132) : (area_w - 52);
+        int ddl = ddr - 56;
+        if (mx >= ddl && mx <= ddr && my >= y + 16 && my <= y + 40) {
+            do_archive_export_all_dds(ytd_idx);
             return true;
         }
     }
@@ -3126,9 +3215,14 @@ static LRESULT CALLBACK ContentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                     if (child->rpf_parent != ytd) continue;
                     if (my >= y && my < y + RPF_ENTRY_H) {
                         int unload_left = area_w - 116, unload_right = area_w - 56;
+                        int dds_left = area_w - 184, dds_right = area_w - 124;
                         if (mx >= unload_left && mx <= unload_right &&
                             my >= y + 9 && my <= y + 33) {
                             unload_rpf_archive(c);
+                        } else if (child->texture_count > 0 &&
+                                   mx >= dds_left && mx <= dds_right &&
+                                   my >= y + 9 && my <= y + 33) {
+                            do_archive_export_all_dds(c);
                         } else {
                             child->expanded = !child->expanded;
                             LOG("RPF entry '%s' %s (%d textures)", child->name,
