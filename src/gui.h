@@ -16,8 +16,10 @@ typedef struct {
     HWND hwnd_sidebar;
     HWND hwnd_content;
     HWND hwnd_status;
+    HWND hwnd_totals;
     HWND hwnd_search;
     HWND hwnd_header;
+    HWND hwnd_menubar;
 
     YtdFile *ytds[MAX_LOADED_YTDS];
     int ytd_count;
@@ -32,6 +34,11 @@ typedef struct {
     int sel_tex_idx;
     
     bool use_gpu_encoding;
+    RECT rc_sponsor;
+    bool sponsor_hovered;
+
+    int selected_row_idx;
+    int hovered_row_idx;
 } AppState;
 
 extern AppState g_app;

@@ -46,6 +46,27 @@ AppState g_app = {0};
 #define ID_SIDEBAR_SAMEFORMAT 1014
 #define ID_SIDEBAR_GRID       1015
 
+/* Menu commands */
+#define ID_MENU_EXIT             1200
+#define ID_MENU_SORT_NAME        1301
+#define ID_MENU_SORT_TYPE        1302
+#define ID_MENU_SORT_SIZE        1303
+#define ID_MENU_SORT_TEXCOUNT    1304
+#define ID_MENU_SORT_RESOLUTION  1305
+#define ID_MENU_SORT_MIPMAPS     1306
+#define ID_MENU_SORT_COMPRESSION 1307
+#define ID_MENU_SORT_MODIFIED    1308
+
+#define ID_MENU_GRID_SMALL       1401
+#define ID_MENU_GRID_MEDIUM      1402
+#define ID_MENU_GRID_NATIVE      1403
+
+#define ID_MENU_ENC_CPU          1501
+#define ID_MENU_ENC_GPU          1502
+
+#define ID_MENU_SPONSOR          1601
+#define ID_MENU_ABOUT            1602
+
 #define IDC_DET_CRITERION 3030
 #define IDC_MIG_CRITERION 3031
 #define IDC_MIG_STRATEGY  3032
@@ -93,11 +114,14 @@ typedef struct {
 #define IDC_OPT_MIPMODE 3004
 #define IDC_OPT_MIPVAL  3005
 
-#define SIDEBAR_WIDTH   220
-#define HEADER_HEIGHT   56
+#define SIDEBAR_WIDTH   0
+#define HEADER_HEIGHT   0
+#define TOOLBAR_HEIGHT  32
 #define STATUS_HEIGHT   28
 #define CARD_MARGIN     8
 #define FOLDER_H        56
+
+#define MENU_BAR_HEIGHT    24
 
 /* Texture grid card size is adjustable at runtime (Small / Medium / Native),
  * mirroring the C# "Grid" button. CARD_W/CARD_H read the active size. */
@@ -112,6 +136,20 @@ static const int g_grid_h[3] = {200, 260, 340};
 static LRESULT CALLBACK MainWndProc(HWND, UINT, WPARAM, LPARAM);
 static LRESULT CALLBACK ContentWndProc(HWND, UINT, WPARAM, LPARAM);
 static LRESULT CALLBACK SidebarWndProc(HWND, UINT, WPARAM, LPARAM);
+static LRESULT CALLBACK MenuBarWndProc(HWND, UINT, WPARAM, LPARAM);
+static LRESULT CALLBACK StatusBarWndProc(HWND, UINT, WPARAM, LPARAM);
+static LRESULT CALLBACK TotalsBarWndProc(HWND, UINT, WPARAM, LPARAM);
+static void show_menu_dropdown(HWND hwnd, int menu_idx);
+
+typedef struct {
+    bool is_archive;
+    int ytd_idx;
+    int tex_idx;
+} GridRow;
+
+static int get_visible_rows(GridRow *rows, int max_rows);
+static void format_size_commas(size_t size, wchar_t *buf, int max_len);
+
 static void layout_children(void);
 static void open_file_dialog(HWND parent);
 static void open_folder_dialog(HWND parent);
@@ -123,6 +161,8 @@ static void do_smart_optimize(void);
 static void paint_content(HWND hwnd, HDC hdc);
 static void paint_sidebar(HWND hwnd, HDC hdc);
 static void paint_header(HWND hwnd, HDC hdc);
+static bool toolbar_button_enabled(int id);
+static void toolbar_command(HWND hwnd, int id);
 static bool hit_test_texture(int mx, int my, int *out_ytd, int *out_tex, int *out_cx, int *out_cy);
 static void show_texture_context_menu(HWND hwnd, int screen_x, int screen_y, int ytd_idx, int tex_idx);
 static bool do_texture_resize(int ytd_idx, int tex_idx, int new_w, int new_h, TexFormat fmt, int max_mips);
@@ -141,7 +181,16 @@ static void unload_rpf_archive(int ytd_idx);
 static int texture_grid_height(YtdFile *ytd, int area_w);
 static void select_language(void);
 static void apply_archive_sort(void);
-static bool select_import_types(HWND parent);
+typedef struct {
+    const wchar_t *name;
+    int width;
+} GridColumn;
+
+typedef struct {
+    RECT rc;
+    const wchar_t *text;
+    bool hovered;
+} MenuBarItem;
 
 /* ── Sidebar button struct ─────────────────────────────────────────── */
 
@@ -158,15 +207,10 @@ static SidebarButton g_sidebar_btns[] = {
     {{0}, ID_SIDEBAR_ADDFOLDER,  L"Add Folder",     false, true},
     {{0}, ID_SIDEBAR_SAVEALL,    L"Save All",       false, true},
     {{0}, ID_SIDEBAR_CLEARALL,   L"Clear All",      false, true},
-    {{0}, ID_SIDEBAR_DETECT,     L"Detect Duplicates", false, true},
-    {{0}, ID_SIDEBAR_MIGRATE,    L"Migrate Dups",      false, false},  /* shown only after detect */
-    {{0}, ID_SIDEBAR_OPTIMIZE,   L"Smart Optimize", false, true},
-    {{0}, ID_SIDEBAR_FASTRECOMP, L"Recompress",     false, true},
-    {{0}, ID_SIDEBAR_SAMEFORMAT, L"",               false, false},
-    {{0}, ID_SIDEBAR_TOGGLE_ENC, L"Encoder: CPU",   false, true},
-    {{0}, ID_SIDEBAR_LANGUAGE,   L"Language: English", false, true},
-    {{0}, ID_SIDEBAR_SORT,       L"Sort: Name", false, true},
-    {{0}, ID_SIDEBAR_GRID,       L"Grid: Medium", false, true},
+    {{0}, ID_SIDEBAR_DETECT,     L"Detect",         false, true},
+    {{0}, ID_SIDEBAR_MIGRATE,    L"Migrate",        false, false},  /* shown only after detect */
+    {{0}, ID_SIDEBAR_OPTIMIZE,   L"Optimize",       false, true},
+    {{0}, ID_SIDEBAR_FASTRECOMP, L"Recomp",         false, true},
 };
 #define SIDEBAR_BTN_COUNT (sizeof(g_sidebar_btns)/sizeof(g_sidebar_btns[0]))
 
@@ -439,20 +483,15 @@ static const wchar_t *language_button_text(void) {
 }
 
 static void update_sidebar_labels(void) {
-    g_sidebar_btns[0].text = trw9(L"Add File", L"Adicionar arquivo", L"Añadir archivo", L"Добавить файл", L"Dosya ekle", L"添加文件", L"फ़ाइल जोड़ें", L"ファイル追加", L"إضافة ملف");
+    return;
+    g_sidebar_btns[0].text = trw9(L"Add File", L"Adicionar arquivo", L"Añadir arquivo", L"Добавить файл", L"Dosya ekle", L"添加文件", L"फ़ाइल जोड़ें", L"ファイル追加", L"إضافة ملف");
     g_sidebar_btns[1].text = trw9(L"Add Folder", L"Adicionar pasta", L"Añadir carpeta", L"Добавить папку", L"Klasör ekle", L"添加文件夹", L"फ़ोल्डर जोड़ें", L"フォルダー追加", L"إضافة مجلد");
     g_sidebar_btns[2].text = trw9(L"Save All", L"Salvar tudo", L"Guardar todo", L"Сохранить все", L"Tümünü kaydet", L"全部保存", L"सभी सहेजें", L"すべて保存", L"حفظ الكل");
     g_sidebar_btns[3].text = trw9(L"Clear All", L"Limpar tudo", L"Limpiar todo", L"Очистить все", L"Tümünü temizle", L"全部清除", L"सभी साफ़ करें", L"すべてクリア", L"مسح الكل");
     g_sidebar_btns[4].text = trw9(L"Detect Duplicates", L"Detectar duplicadas", L"Detectar duplicados", L"Найти дубликаты", L"Yinelenenleri bul", L"查找重复项", L"डुप्लिकेट खोजें", L"重複を検出", L"كشف التكرارات");
     g_sidebar_btns[5].text = trw9(L"Migrate Dups", L"Migrar duplicadas", L"Migrar duplicados", L"Перенести дубликаты", L"Yinelenenleri taşı", L"迁移重复项", L"डुप्लिकेट स्थानांतरण", L"重複を移行", L"نقل التكرارات");
-    g_sidebar_btns[6].text = trw9(L"Smart Optimize", L"Otimização inteligente", L"Optimización inteligente", L"Умная оптимизация", L"Akıllı optimize", L"智能优化", L"स्मार्ट अनुकूलन", L"スマート最適化", L"تحسين ذكي");
-    g_sidebar_btns[7].text = trw9(L"Fast Recompress", L"Recompressão rápida", L"Recompresión rápida", L"Быстрое сжатие", L"Hızlı sıkıştır", L"快速重新压缩", L"तेज़ पुनःसंपीड़न", L"高速再圧縮", L"إعادة ضغط سريعة");
-    g_sidebar_btns[8].text = trw(L"Recompress Same Format", L"Recomprimir mesmo formato",
-        L"Recomprimir mismo formato", L"Сжать в том же формате");
-    g_sidebar_btns[7].text = L"Recompress";
-    g_sidebar_btns[9].text = g_app.use_gpu_encoding
-        ? trw(L"Encoder: GPU", L"Encoder: GPU", L"Codificador: GPU", L"Кодировщик: GPU")
-        : trw(L"Encoder: CPU", L"Encoder: CPU", L"Codificador: CPU", L"Кодировщик: CPU");
+    g_sidebar_btns[6].text = trw9(L"Smart Optimize", L"Otimização inteligente", L"Optimización inteligente", L"Умная optimização", L"Akıllı optimize", L"智能优化", L"स्मार्ट अनुकूलन", L"スマート最適化", L"تحسين ذكي");
+    g_sidebar_btns[7].text = trw9(L"Fast Recompress", L"Recompressão rápida", L"Recompresión rápida", L"Быстрое сжатие", L"Hızlı sıkıştır", L"快速重新压缩", L"तेज़ पुनःসম্পीড়น", L"高速再圧縮", L"إعادة ضغط سريعة");
     if (g_language == UI_LANG_BENGALI) {
         g_sidebar_btns[0].text = L"ফাইল যোগ করুন"; g_sidebar_btns[1].text = L"ফোল্ডার যোগ করুন";
         g_sidebar_btns[2].text = L"সব সংরক্ষণ"; g_sidebar_btns[3].text = L"সব মুছুন";
@@ -471,24 +510,6 @@ static void update_sidebar_labels(void) {
     } else if (g_language == UI_LANG_ITALIAN) {
         g_sidebar_btns[0].text = L"Aggiungi file"; g_sidebar_btns[1].text = L"Aggiungi cartella";
         g_sidebar_btns[2].text = L"Salva tutto"; g_sidebar_btns[3].text = L"Cancella tutto";
-    }
-    g_sidebar_btns[10].text = language_button_text();
-    switch (g_sort_mode) {
-        case SORT_BY_TYPE: g_sidebar_btns[11].text = trw8(L"Sort: Type", L"Ordenar: Tipo", L"Ordenar: Tipo", L"Сорт.: Тип", L"Sırala: Tür", L"排序: 类型", L"क्रम: प्रकार", L"並べ替え: 種類"); break;
-        case SORT_BY_SIZE: g_sidebar_btns[11].text = trw8(L"Sort: Size", L"Ordenar: Tamanho", L"Ordenar: Tamaño", L"Сорт.: Размер", L"Sırala: Boyut", L"排序: 大小", L"क्रम: आकार", L"並べ替え: サイズ"); break;
-        case SORT_BY_TEXTURE_COUNT: g_sidebar_btns[11].text = trw8(L"Sort: Textures", L"Ordenar: Texturas", L"Ordenar: Texturas", L"Сорт.: Текстуры", L"Sırala: Dokular", L"排序: 纹理数", L"क्रम: टेक्सचर", L"並べ替え: テクスチャ"); break;
-        case SORT_BY_RESOLUTION: g_sidebar_btns[11].text = trw8(L"Sort: Resolution", L"Ordenar: Resolucao", L"Ordenar: Resolucion", L"Sort: Resolution", L"Sort: Resolution", L"Sort: Resolution", L"Sort: Resolution", L"Sort: Resolution"); break;
-        case SORT_BY_MIPMAPS: g_sidebar_btns[11].text = trw8(L"Sort: Mipmaps", L"Ordenar: Mipmaps", L"Ordenar: Mipmaps", L"Sort: Mipmaps", L"Sort: Mipmaps", L"Sort: Mipmaps", L"Sort: Mipmaps", L"Sort: Mipmaps"); break;
-        case SORT_BY_COMPRESSION: g_sidebar_btns[11].text = trw8(L"Sort: Compression", L"Ordenar: Compressao", L"Ordenar: Compresion", L"Sort: Compression", L"Sort: Compression", L"Sort: Compression", L"Sort: Compression", L"Sort: Compression"); break;
-        case SORT_BY_MODIFIED: g_sidebar_btns[11].text = trw8(L"Sort: Modified", L"Ordenar: Modificados", L"Ordenar: Modificados", L"Сорт.: Изменены", L"Sırala: Değişen", L"排序: 已修改", L"क्रम: संशोधित", L"並べ替え: 更新"); break;
-        default: g_sidebar_btns[11].text = trw8(L"Sort: Name", L"Ordenar: Nome", L"Ordenar: Nombre", L"Сорт.: Имя", L"Sırala: Ad", L"排序: 名称", L"क्रम: नाम", L"並べ替え: 名前"); break;
-    }
-    {
-        const wchar_t *gname =
-            (g_grid_index == 0) ? trw8(L"Grid: Small", L"Grade: Pequena", L"Cuadrícula: Pequeña", L"Сетка: Малая", L"Izgara: Küçük", L"网格: 小", L"ग्रिड: छोटा", L"グリッド: 小") :
-            (g_grid_index == 2) ? trw8(L"Grid: Native", L"Grade: Nativa", L"Cuadrícula: Nativa", L"Сетка: Полная", L"Izgara: Yerel", L"网格: 原生", L"ग्रिड: मूल", L"グリッド: ネイティブ") :
-                                  trw8(L"Grid: Medium", L"Grade: Média", L"Cuadrícula: Media", L"Сетка: Средняя", L"Izgara: Orta", L"网格: 中", L"ग्रिड: मध्यम", L"グリッド: 中");
-        g_sidebar_btns[12].text = gname;
     }
 }
 
@@ -519,11 +540,11 @@ void gui_init(HINSTANCE hInst) {
     RegisterClassExW(&wc);
 
     WNDCLASSEXW wc2 = {sizeof(wc2)};
-    wc2.style = CS_HREDRAW | CS_VREDRAW;
+    wc2.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc2.lpfnWndProc = ContentWndProc;
     wc2.hInstance = hInst;
     wc2.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc2.hbrBackground = CreateSolidBrush(CLR_BG_DARK);
+    wc2.hbrBackground = CreateSolidBrush(CLR_VS_MAIN);
     wc2.lpszClassName = L"EasyOptimizerContent";
     RegisterClassExW(&wc2);
 
@@ -532,9 +553,36 @@ void gui_init(HINSTANCE hInst) {
     wc3.lpfnWndProc = SidebarWndProc;
     wc3.hInstance = hInst;
     wc3.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc3.hbrBackground = CreateSolidBrush(CLR_SURFACE_DARK);
+    wc3.hbrBackground = CreateSolidBrush(CLR_VS_MAIN);
     wc3.lpszClassName = L"EasyOptimizerSidebar";
     RegisterClassExW(&wc3);
+
+    WNDCLASSEXW wc4 = {sizeof(wc4)};
+    wc4.style = CS_HREDRAW | CS_VREDRAW;
+    wc4.lpfnWndProc = MenuBarWndProc;
+    wc4.hInstance = hInst;
+    wc4.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc4.hbrBackground = CreateSolidBrush(CLR_VS_MENU);
+    wc4.lpszClassName = L"EasyOptimizerMenuBar";
+    RegisterClassExW(&wc4);
+
+    WNDCLASSEXW wc5 = {sizeof(wc5)};
+    wc5.style = CS_HREDRAW | CS_VREDRAW;
+    wc5.lpfnWndProc = StatusBarWndProc;
+    wc5.hInstance = hInst;
+    wc5.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc5.hbrBackground = CreateSolidBrush(CLR_VS_STATUS);
+    wc5.lpszClassName = L"EasyOptimizerStatusBar";
+    RegisterClassExW(&wc5);
+
+    WNDCLASSEXW wc6 = {sizeof(wc6)};
+    wc6.style = CS_HREDRAW | CS_VREDRAW;
+    wc6.lpfnWndProc = TotalsBarWndProc;
+    wc6.hInstance = hInst;
+    wc6.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc6.hbrBackground = CreateSolidBrush(CLR_VS_EDITOR);
+    wc6.lpszClassName = L"EasyOptimizerTotalsBar";
+    RegisterClassExW(&wc6);
 
     g_app.hwnd_main = CreateWindowExW(0, L"EasyOptimizerMain", L"EasyOptimizer-V by LN-Development",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1100, 768,
@@ -544,33 +592,40 @@ void gui_init(HINSTANCE hInst) {
         SendMessageW(g_app.hwnd_main, WM_SETICON, ICON_SMALL, (LPARAM)app_icon_sm);
     }
 
-    g_app.hwnd_header = CreateWindowExW(0, L"STATIC", NULL,
-        WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, 0, 0, 100, HEADER_HEIGHT,
+    g_app.hwnd_menubar = CreateWindowExW(0, L"EasyOptimizerMenuBar", NULL,
+        WS_CHILD | WS_VISIBLE, 0, 0, 100, MENU_BAR_HEIGHT,
         g_app.hwnd_main, NULL, hInst, NULL);
 
     g_app.hwnd_sidebar = CreateWindowExW(0, L"EasyOptimizerSidebar", NULL,
-        WS_CHILD | WS_VISIBLE, 0, HEADER_HEIGHT, SIDEBAR_WIDTH, 500,
+        WS_CHILD | WS_VISIBLE, 0, MENU_BAR_HEIGHT, 100, TOOLBAR_HEIGHT,
         g_app.hwnd_main, NULL, hInst, NULL);
 
     g_app.hwnd_content = CreateWindowExW(0, L"EasyOptimizerContent", NULL,
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL, SIDEBAR_WIDTH, HEADER_HEIGHT, 600, 500,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL, 0, MENU_BAR_HEIGHT + TOOLBAR_HEIGHT, 600, 500,
         g_app.hwnd_main, NULL, hInst, NULL);
+    ShowScrollBar(g_app.hwnd_content, SB_VERT, FALSE);
 
-    /* Parent the search box to the main window (not the header STATIC) so its
-     * EN_CHANGE notifications reach MainWndProc's WM_COMMAND handler. Positioned
-     * over the header area by layout_children; created last so it stays on top. */
     g_app.hwnd_search = CreateWindowExW(0, L"EDIT", NULL,
         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-        0, 0, 300, 28, g_app.hwnd_main, (HMENU)ID_SEARCH_BOX, hInst, NULL);
-    SendMessageW(g_app.hwnd_search, WM_SETFONT, (WPARAM)theme_font_display(), TRUE);
+        0, 0, 160, 22, g_app.hwnd_sidebar, (HMENU)ID_SEARCH_BOX, hInst, NULL);
+    SendMessageW(g_app.hwnd_search, WM_SETFONT, (WPARAM)theme_font_small(), TRUE);
     SetWindowTextW(g_app.hwnd_search, L"");
+    SendMessageW(g_app.hwnd_search, EM_SETCUEBANNER, FALSE, (LPARAM)L"Find Item");
+    SendMessageW(g_app.hwnd_search, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
 
-    g_app.hwnd_status = CreateWindowExW(0, STATUSCLASSNAMEW, L"Ready",
-        WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0,
+    g_app.hwnd_status = CreateWindowExW(0, L"EasyOptimizerStatusBar", NULL,
+        WS_CHILD | WS_VISIBLE, 0, 0, 0, 22,
         g_app.hwnd_main, NULL, hInst, NULL);
 
+    g_app.hwnd_totals = CreateWindowExW(0, L"EasyOptimizerTotalsBar", NULL,
+        WS_CHILD | WS_VISIBLE, 0, 0, 0, 22,
+        g_app.hwnd_main, NULL, hInst, NULL);
+
+    g_app.selected_row_idx = -1;
+    g_app.hovered_row_idx = -1;
+
     layout_children();
-    gui_update_status("Ready - No files loaded");
+    gui_update_status("");
     log_ng_keys_state();
 
     ShowWindow(g_app.hwnd_main, SW_SHOW);
@@ -594,33 +649,34 @@ static void layout_children(void) {
     GetClientRect(g_app.hwnd_main, &rc);
     int w = rc.right, h = rc.bottom;
 
-    SendMessageW(g_app.hwnd_status, WM_SIZE, 0, 0);
-    RECT status_rc;
-    GetWindowRect(g_app.hwnd_status, &status_rc);
-    int sh = status_rc.bottom - status_rc.top;
+    int sh = 22; // custom status bar height
+    int th = (g_app.ytd_count > 0) ? 22 : 0; // totals bar only when data exists
+    MoveWindow(g_app.hwnd_status, 0, h - sh, w, sh, TRUE);
+    ShowWindow(g_app.hwnd_totals, th > 0 ? SW_SHOW : SW_HIDE);
+    if (th > 0)
+        MoveWindow(g_app.hwnd_totals, 0, h - sh - th, w, th, TRUE);
 
-    MoveWindow(g_app.hwnd_header, 0, 0, w, HEADER_HEIGHT, TRUE);
-    MoveWindow(g_app.hwnd_sidebar, 0, HEADER_HEIGHT, SIDEBAR_WIDTH, h - HEADER_HEIGHT - sh, TRUE);
-    MoveWindow(g_app.hwnd_content, SIDEBAR_WIDTH, HEADER_HEIGHT, w - SIDEBAR_WIDTH, h - HEADER_HEIGHT - sh, TRUE);
+    int top_total = MENU_BAR_HEIGHT + TOOLBAR_HEIGHT;
 
-    /* Position search box inside header, aligned with content area */
-    int search_x = SIDEBAR_WIDTH + 12;
-    int search_y = (HEADER_HEIGHT - 28) / 2;
-    MoveWindow(g_app.hwnd_search, search_x, search_y, w - search_x - 16, 28, TRUE);
-
-    /* Update sidebar button rects (skip hidden buttons so the rest pack up) */
-    int by = 16;
-    for (int i = 0; i < (int)SIDEBAR_BTN_COUNT; i++) {
-        if (!g_sidebar_btns[i].visible) {
-            SetRectEmpty(&g_sidebar_btns[i].rc);
-            continue;
-        }
-        g_sidebar_btns[i].rc.left = 12;
-        g_sidebar_btns[i].rc.top = by;
-        g_sidebar_btns[i].rc.right = SIDEBAR_WIDTH - 12;
-        g_sidebar_btns[i].rc.bottom = by + 36;
-        by += 44;
+    MoveWindow(g_app.hwnd_menubar, 0, 0, w, MENU_BAR_HEIGHT, TRUE);
+    if (g_app.hwnd_sidebar) {
+        MoveWindow(g_app.hwnd_sidebar, 0, MENU_BAR_HEIGHT, w, TOOLBAR_HEIGHT, TRUE);
     }
+    MoveWindow(g_app.hwnd_content, 0, top_total, w, h - top_total - sh - th, TRUE);
+
+    /* Search box sits after the command cluster, like RPF Viewer. */
+    int search_h = 20;
+    int search_w = 160;
+    if (search_w > w / 4) search_w = w / 4;
+    int search_x = 590;
+    if (search_x + search_w + 8 > w)
+        search_x = w - search_w - 8;
+    if (search_x < 8)
+        search_x = 8;
+    int search_y = 6;
+    MoveWindow(g_app.hwnd_search, search_x, search_y, search_w, search_h, TRUE);
+
+    SetRectEmpty(&g_app.rc_sponsor);
 }
 
 /* ── Status ────────────────────────────────────────────────────────── */
@@ -636,6 +692,8 @@ void gui_update_status(const char *fmt, ...) {
     wchar_t wbuf[512];
     MultiByteToWideChar(CP_UTF8, 0, g_app.status_text, -1, wbuf, 512);
     SendMessageW(g_app.hwnd_status, SB_SETTEXTW, 0, (LPARAM)wbuf);
+    if (g_app.hwnd_totals)
+        InvalidateRect(g_app.hwnd_totals, NULL, TRUE);
 }
 
 /* ── File open dialog ──────────────────────────────────────────────── */
@@ -988,6 +1046,7 @@ void gui_add_ytd(const wchar_t *path) {
         group->rpf_child_count = context.discovered;
         gui_update_status("RPF scan: %d files listed, %d opened, %d unavailable; expand '%s'",
             context.discovered, context.loaded, context.unavailable, group->name);
+        layout_children();
         InvalidateRect(g_app.hwnd_content, NULL, TRUE);
         InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
         return;
@@ -1010,6 +1069,7 @@ void gui_add_ytd(const wchar_t *path) {
     g_app.ytds[g_app.ytd_count++] = archive;
     apply_archive_sort();
     gui_update_status("Loaded %s - %d textures", archive->name, archive->texture_count);
+    layout_children();
     InvalidateRect(g_app.hwnd_content, NULL, TRUE);
     InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
 }
@@ -1674,6 +1734,7 @@ static void clear_preview_consolidations(void) {
         }
     }
     reset_migration_state();
+    layout_children();
 }
 
 static void do_detect_duplicates(void) {
@@ -1883,15 +1944,19 @@ static LPDLGTEMPLATE build_smart_opt_template(const wchar_t *title) {
     uint8_t *p = buf;
 
     DLGTEMPLATE *dt = (DLGTEMPLATE *)p;
-    dt->style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    dt->style = DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
     dt->dwExtendedStyle = 0;
     dt->cdit = 11; 
-    dt->x = 0; dt->y = 0; dt->cx = 200; dt->cy = 130;
+    dt->x = 0; dt->y = 0; dt->cx = 230; dt->cy = 148;
     p += sizeof(DLGTEMPLATE);
     *(WORD *)p = 0; p += 2; 
     *(WORD *)p = 0; p += 2; 
     size_t tlen = (wcslen(title) + 1) * 2;
     memcpy(p, title, tlen); p += tlen;
+    *(WORD *)p = 9; p += 2;
+    const wchar_t *font_name = L"Segoe UI";
+    size_t flen = (wcslen(font_name) + 1) * 2;
+    memcpy(p, font_name, flen); p += flen;
 
     p = (uint8_t *)(((uintptr_t)p + 3) & ~3);
 
@@ -1910,19 +1975,19 @@ static LPDLGTEMPLATE build_smart_opt_template(const wchar_t *title) {
         *(WORD *)p = 0; p += 2; \
     } while(0)
 
-    ADD_ITEM(SS_LEFT, 10, 10, 60, 12, (WORD)-1, 0x0082, L"Max Width:");
-    ADD_ITEM(SS_LEFT, 10, 30, 60, 12, (WORD)-1, 0x0082, L"Max Height:");
-    ADD_ITEM(SS_LEFT, 10, 50, 60, 12, (WORD)-1, 0x0082, L"Format:");
-    ADD_ITEM(SS_LEFT, 10, 70, 60, 12, (WORD)-1, 0x0082, L"Mipmaps:");
+    ADD_ITEM(SS_LEFT, 14, 16, 68, 10, (WORD)-1, 0x0082, L"Max Width:");
+    ADD_ITEM(SS_LEFT, 14, 38, 68, 10, (WORD)-1, 0x0082, L"Max Height:");
+    ADD_ITEM(SS_LEFT, 14, 60, 68, 10, (WORD)-1, 0x0082, L"Format:");
+    ADD_ITEM(SS_LEFT, 14, 82, 68, 10, (WORD)-1, 0x0082, L"Mipmaps:");
     
-    ADD_ITEM(CBS_DROPDOWN | WS_TABSTOP | WS_VSCROLL, 80, 8, 110, 100, IDC_OPT_MAXW, 0x0085, L"");
-    ADD_ITEM(CBS_DROPDOWN | WS_TABSTOP | WS_VSCROLL, 80, 28, 110, 100, IDC_OPT_MAXH, 0x0085, L"");
-    ADD_ITEM(CBS_DROPDOWNLIST | WS_TABSTOP, 80, 48, 110, 100, IDC_OPT_FMT,  0x0085, L"");
-    ADD_ITEM(CBS_DROPDOWNLIST | WS_TABSTOP, 80, 70, 75, 100, IDC_OPT_MIPMODE, 0x0085, L"");
-    ADD_ITEM(WS_BORDER | WS_TABSTOP, 160, 70, 30, 12, IDC_OPT_MIPVAL, 0x0081, L"");
+    ADD_ITEM(CBS_DROPDOWN | WS_TABSTOP | WS_VSCROLL, 90, 14, 130, 90, IDC_OPT_MAXW, 0x0085, L"");
+    ADD_ITEM(CBS_DROPDOWN | WS_TABSTOP | WS_VSCROLL, 90, 36, 130, 90, IDC_OPT_MAXH, 0x0085, L"");
+    ADD_ITEM(CBS_DROPDOWNLIST | WS_TABSTOP, 90, 58, 130, 90, IDC_OPT_FMT,  0x0085, L"");
+    ADD_ITEM(CBS_DROPDOWNLIST | WS_TABSTOP, 90, 80, 82, 90, IDC_OPT_MIPMODE, 0x0085, L"");
+    ADD_ITEM(WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 178, 80, 42, 14, IDC_OPT_MIPVAL, 0x0081, L"");
     
-    ADD_ITEM(BS_DEFPUSHBUTTON | WS_TABSTOP, 50, 100, 50, 16, IDOK,     0x0080, L"Optimize");
-    ADD_ITEM(BS_PUSHBUTTON | WS_TABSTOP,    110, 100, 50, 16, IDCANCEL, 0x0080, L"Cancel");
+    ADD_ITEM(BS_DEFPUSHBUTTON | WS_TABSTOP, 72, 118, 64, 18, IDOK,     0x0080, L"Optimize");
+    ADD_ITEM(BS_PUSHBUTTON | WS_TABSTOP,    146, 118, 64, 18, IDCANCEL, 0x0080, L"Cancel");
 
     #undef ADD_ITEM
     return (LPDLGTEMPLATE)buf;
@@ -2019,16 +2084,20 @@ static LPDLGTEMPLATE build_custom_resize_template(void) {
     uint8_t *p = buf;
 
     DLGTEMPLATE *dt = (DLGTEMPLATE *)p;
-    dt->style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    dt->style = DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
     dt->dwExtendedStyle = 0;
     dt->cdit = 11; 
-    dt->x = 0; dt->y = 0; dt->cx = 200; dt->cy = 130;
+    dt->x = 0; dt->y = 0; dt->cx = 230; dt->cy = 148;
     p += sizeof(DLGTEMPLATE);
     *(WORD *)p = 0; p += 2; 
     *(WORD *)p = 0; p += 2; 
     const wchar_t *title = L"Custom Resize";
     size_t tlen = (wcslen(title) + 1) * 2;
     memcpy(p, title, tlen); p += tlen;
+    *(WORD *)p = 9; p += 2;
+    const wchar_t *font_name = L"Segoe UI";
+    size_t flen = (wcslen(font_name) + 1) * 2;
+    memcpy(p, font_name, flen); p += flen;
 
     p = (uint8_t *)(((uintptr_t)p + 3) & ~3);
 
@@ -2047,19 +2116,19 @@ static LPDLGTEMPLATE build_custom_resize_template(void) {
         *(WORD *)p = 0; p += 2; \
     } while(0)
 
-    ADD_ITEM(SS_LEFT, 10, 10, 60, 12, (WORD)-1, 0x0082, L"Width:");
-    ADD_ITEM(SS_LEFT, 10, 30, 60, 12, (WORD)-1, 0x0082, L"Height:");
-    ADD_ITEM(SS_LEFT, 10, 50, 60, 12, (WORD)-1, 0x0082, L"Format:");
-    ADD_ITEM(SS_LEFT, 10, 70, 60, 12, (WORD)-1, 0x0082, L"Mipmaps:");
+    ADD_ITEM(SS_LEFT, 14, 16, 68, 10, (WORD)-1, 0x0082, L"Width:");
+    ADD_ITEM(SS_LEFT, 14, 38, 68, 10, (WORD)-1, 0x0082, L"Height:");
+    ADD_ITEM(SS_LEFT, 14, 60, 68, 10, (WORD)-1, 0x0082, L"Format:");
+    ADD_ITEM(SS_LEFT, 14, 82, 68, 10, (WORD)-1, 0x0082, L"Mipmaps:");
     
-    ADD_ITEM(CBS_DROPDOWN | WS_TABSTOP | WS_VSCROLL, 80, 8, 110, 100, IDC_RES_MAXW, 0x0085, L"");
-    ADD_ITEM(CBS_DROPDOWN | WS_TABSTOP | WS_VSCROLL, 80, 28, 110, 100, IDC_RES_MAXH, 0x0085, L"");
-    ADD_ITEM(CBS_DROPDOWNLIST | WS_TABSTOP, 80, 48, 110, 100, IDC_RES_FMT,  0x0085, L"");
-    ADD_ITEM(CBS_DROPDOWNLIST | WS_TABSTOP, 80, 70, 75, 100, IDC_RES_MIPMODE, 0x0085, L"");
-    ADD_ITEM(WS_BORDER | WS_TABSTOP, 160, 70, 30, 12, IDC_RES_MIPVAL, 0x0081, L"");
+    ADD_ITEM(CBS_DROPDOWN | WS_TABSTOP | WS_VSCROLL, 90, 14, 130, 90, IDC_RES_MAXW, 0x0085, L"");
+    ADD_ITEM(CBS_DROPDOWN | WS_TABSTOP | WS_VSCROLL, 90, 36, 130, 90, IDC_RES_MAXH, 0x0085, L"");
+    ADD_ITEM(CBS_DROPDOWNLIST | WS_TABSTOP, 90, 58, 130, 90, IDC_RES_FMT,  0x0085, L"");
+    ADD_ITEM(CBS_DROPDOWNLIST | WS_TABSTOP, 90, 80, 82, 90, IDC_RES_MIPMODE, 0x0085, L"");
+    ADD_ITEM(WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 178, 80, 42, 14, IDC_RES_MIPVAL, 0x0081, L"");
     
-    ADD_ITEM(BS_DEFPUSHBUTTON | WS_TABSTOP, 50, 100, 50, 16, IDOK,     0x0080, L"Resize");
-    ADD_ITEM(BS_PUSHBUTTON | WS_TABSTOP,    110, 100, 50, 16, IDCANCEL, 0x0080, L"Cancel");
+    ADD_ITEM(BS_DEFPUSHBUTTON | WS_TABSTOP, 72, 118, 64, 18, IDOK,     0x0080, L"Resize");
+    ADD_ITEM(BS_PUSHBUTTON | WS_TABSTOP,    146, 118, 64, 18, IDCANCEL, 0x0080, L"Cancel");
 
     #undef ADD_ITEM
     return (LPDLGTEMPLATE)buf;
@@ -2136,6 +2205,16 @@ static void do_fast_recompress(void) {
         gui_update_status("No files loaded");
         return;
     }
+    int confirm = MessageBoxW(g_app.hwnd_main,
+        L"Fast Recompress will rewrite compressed texture data in the loaded files.\n\n"
+        L"It may reduce quality and can change compatible formats to smaller ones.\n"
+        L"Continue?",
+        L"Confirm Recompress",
+        MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
+    if (confirm != IDYES) {
+        gui_update_status("Fast Recompress cancelled");
+        return;
+    }
     int total = 0, downgraded = 0;
     size_t size_before = 0, size_after = 0;
     log_encoder_intent("Fast Recompress");
@@ -2185,6 +2264,15 @@ static void do_fast_recompress(void) {
 static void do_same_format_recompress(void) {
     if (g_app.ytd_count == 0) {
         gui_update_status("No files loaded");
+        return;
+    }
+    int confirm = MessageBoxW(g_app.hwnd_main,
+        L"Recompress Same Format will rewrite compressed texture data while preserving format and resolution.\n\n"
+        L"Continue?",
+        L"Confirm Recompress",
+        MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
+    if (confirm != IDYES) {
+        gui_update_status("Same Format Recompress cancelled");
         return;
     }
 
@@ -2681,6 +2769,7 @@ static void unload_rpf_archive(int ytd_idx) {
     g_app.ytd_count--;
     if (parent && parent->rpf_child_count > 0) parent->rpf_child_count--;
     gui_update_status("Unloaded '%s' from the application; original RPF was not changed", name);
+    layout_children();
     InvalidateRect(g_app.hwnd_content, NULL, TRUE);
     InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
 }
@@ -2720,6 +2809,7 @@ static void do_unload_archive(int idx) {
         g_app.ytd_count--;
         gui_update_status("Unloaded '%s' from the workspace (disk untouched)", name);
     }
+    layout_children();
     InvalidateRect(g_app.hwnd_content, NULL, TRUE);
     InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
 }
@@ -2795,10 +2885,10 @@ static bool handle_archive_header_click(HWND hwnd, int mx, int my, int y,
             return true;
         }
     }
-    /* "DDS" export button (mirror of gui_draw_ytd_card geometry). */
+    /* Export button (mirror of gui_draw_ytd_card geometry). */
     if (!ytd->is_preview && !ytd->is_rpf_group && ytd->texture_count > 0) {
         int ddr = ytd->from_rpf ? (area_w - 132) : (area_w - 52);
-        int ddl = ddr - 56;
+        int ddl = ddr - 68;
         if (mx >= ddl && mx <= ddr && my >= y + 16 && my <= y + 40) {
             do_archive_export_all_dds(ytd_idx);
             return true;
@@ -2830,7 +2920,8 @@ static void paint_texture_grid(HDC hdc, RECT *viewport, YtdFile *ytd,
         if (texture_matches_search(&ytd->textures[t])) visible++;
 
     if (visible == 0) {
-        RECT empty = {12, *io_y, viewport->right - 12, *io_y + 28};
+        int empty_left = ytd->from_rpf ? 34 : 12;
+        RECT empty = {empty_left, *io_y, viewport->right - 12, *io_y + 28};
         SetTextColor(hdc, CLR_TEXT_SECONDARY);
         SelectObject(hdc, theme_font_small());
         DrawTextW(hdc,
@@ -2856,6 +2947,505 @@ static void paint_texture_grid(HDC hdc, RECT *viewport, YtdFile *ytd,
     *io_y += 8;
 }
 
+
+static GridColumn g_cols[] = {
+    {L"Name", 250},
+    {L"Size", 100},
+    {L"Packed", 100},
+    {L"Ratio", 80},
+    {L"Offset", 100},
+    {L"Index", 60},
+    {L"Path", 200},
+    {L"Version", 80},
+    {L"Virtual Size", 100},
+    {L"Physical Size", 100}
+};
+#define COL_COUNT (sizeof(g_cols)/sizeof(g_cols[0]))
+
+static void format_size_commas(size_t size, wchar_t *buf, int max_len) {
+    wchar_t raw[32];
+    _snwprintf(raw, 32, L"%I64u", (unsigned __int64)size);
+    int len = (int)wcslen(raw);
+    int commas = (len - 1) / 3;
+    int out_len = len + commas;
+    if (out_len >= max_len) {
+        wcsncpy(buf, raw, max_len);
+        return;
+    }
+    int dst = out_len;
+    buf[dst--] = L'\0';
+    int count = 0;
+    for (int src = len - 1; src >= 0; src--) {
+        buf[dst--] = raw[src];
+        count++;
+        if (count == 3 && src > 0) {
+            buf[dst--] = L',';
+            count = 0;
+        }
+    }
+}
+
+static bool single_archive_matches_search(YtdFile *ytd) {
+    if (!g_app.search_filter[0]) return true;
+    char lower_name[EO_MAX_NAME], lower_filter[256];
+    strncpy(lower_name, ytd->name, EO_MAX_NAME);
+    lower_name[EO_MAX_NAME - 1] = 0;
+    _strlwr_s(lower_name, EO_MAX_NAME);
+    strncpy(lower_filter, g_app.search_filter, 256);
+    lower_filter[255] = 0;
+    _strlwr_s(lower_filter, 256);
+    if (strstr(lower_name, lower_filter) != NULL) return true;
+    for (int t = 0; t < ytd->texture_count; t++) {
+        if (texture_matches_search(&ytd->textures[t])) return true;
+    }
+    return false;
+}
+
+static bool archive_matches_search(YtdFile *ytd, YtdFile **all_ytds, int ytd_count) {
+    if (!g_app.search_filter[0]) return true;
+    char lower_name[EO_MAX_NAME], lower_filter[256];
+    strncpy(lower_name, ytd->name, EO_MAX_NAME);
+    lower_name[EO_MAX_NAME - 1] = 0;
+    _strlwr_s(lower_name, EO_MAX_NAME);
+    strncpy(lower_filter, g_app.search_filter, 256);
+    lower_filter[255] = 0;
+    _strlwr_s(lower_filter, 256);
+    if (strstr(lower_name, lower_filter) != NULL) return true;
+    if (ytd->is_rpf_group) {
+        for (int i = 0; i < ytd_count; i++) {
+            YtdFile *child = all_ytds[i];
+            if (child && child->rpf_parent == ytd) {
+                char c_name[EO_MAX_NAME];
+                strncpy(c_name, child->name, EO_MAX_NAME);
+                c_name[EO_MAX_NAME - 1] = 0;
+                _strlwr_s(c_name, EO_MAX_NAME);
+                if (strstr(c_name, lower_filter) != NULL) return true;
+                for (int t = 0; t < child->texture_count; t++) {
+                    if (texture_matches_search(&child->textures[t])) return true;
+                }
+            }
+        }
+    } else {
+        for (int t = 0; t < ytd->texture_count; t++) {
+            if (texture_matches_search(&ytd->textures[t])) return true;
+        }
+    }
+    return false;
+}
+
+static int get_visible_rows(GridRow *rows, int max_rows) {
+    int count = 0;
+    bool search_active = (g_app.search_filter[0] != '\0');
+    for (int i = 0; i < g_app.ytd_count; i++) {
+        YtdFile *ytd = g_app.ytds[i];
+        if (ytd->from_rpf) continue;
+        
+        if (search_active && !archive_matches_search(ytd, g_app.ytds, g_app.ytd_count)) continue;
+        
+        if (count < max_rows) {
+            rows[count].is_archive = true;
+            rows[count].ytd_idx = i;
+            rows[count].tex_idx = -1;
+        }
+        count++;
+        
+        bool ytd_expanded = ytd->expanded || search_active;
+        if (ytd_expanded) {
+            if (ytd->is_rpf_group) {
+                for (int c = 0; c < g_app.ytd_count; c++) {
+                    YtdFile *child = g_app.ytds[c];
+                    if (child->rpf_parent != ytd) continue;
+                    
+                    if (search_active && !single_archive_matches_search(child)) continue;
+                    
+                    if (count < max_rows) {
+                        rows[count].is_archive = true;
+                        rows[count].ytd_idx = c;
+                        rows[count].tex_idx = -1;
+                    }
+                    count++;
+                    
+                    bool child_expanded = child->expanded || search_active;
+                    if (child_expanded) {
+                        for (int t = 0; t < child->texture_count; t++) {
+                            TextureEntry *tex = &child->textures[t];
+                            if (search_active && !texture_matches_search(tex)) continue;
+                            if (count < max_rows) {
+                                rows[count].is_archive = false;
+                                rows[count].ytd_idx = c;
+                                rows[count].tex_idx = t;
+                            }
+                            count++;
+                        }
+                    }
+                }
+            } else {
+                for (int t = 0; t < ytd->texture_count; t++) {
+                    TextureEntry *tex = &ytd->textures[t];
+                    if (search_active && !texture_matches_search(tex)) continue;
+                    if (count < max_rows) {
+                        rows[count].is_archive = false;
+                        rows[count].ytd_idx = i;
+                        rows[count].tex_idx = t;
+                    }
+                    count++;
+                }
+            }
+        }
+    }
+    return count;
+}
+
+static MenuBarItem g_menu_items[] = {
+    {{0}, L"FILE", false},
+    {{0}, L"ACTIONS", false},
+    {{0}, L"VIEW", false}
+};
+#define MENU_ITEM_COUNT (sizeof(g_menu_items)/sizeof(g_menu_items[0]))
+static int g_active_menu_idx = -1;
+
+static void show_menu_dropdown(HWND hwnd, int menu_idx) {
+    HMENU hMenu = CreatePopupMenu();
+    POINT pt = {g_menu_items[menu_idx].rc.left, g_menu_items[menu_idx].rc.bottom};
+    ClientToScreen(hwnd, &pt);
+    
+    if (menu_idx == 0) {
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_ADDYTD, L"Add File...");
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_ADDFOLDER, L"Add Folder...");
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_SAVEALL, L"Save All");
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_CLEARALL, L"Clear All");
+        AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hMenu, MF_STRING, ID_MENU_EXIT, L"Exit");
+    } else if (menu_idx == 1) {
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_DETECT, L"Detect Duplicates");
+        bool has_migrations = g_has_pending_migration;
+        AppendMenuW(hMenu, MF_STRING | (has_migrations ? MF_ENABLED : (MF_GRAYED | MF_DISABLED)), 
+                    ID_SIDEBAR_MIGRATE, L"Migrate Duplicates");
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_OPTIMIZE, L"Smart Optimize");
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_FASTRECOMP, L"Fast Recompress");
+    } else if (menu_idx == 2) {
+        HMENU hSortMenu = CreatePopupMenu();
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_NAME ? MF_CHECKED : 0), ID_MENU_SORT_NAME, L"Sort by Name");
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_TYPE ? MF_CHECKED : 0), ID_MENU_SORT_TYPE, L"Sort by Type");
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_SIZE ? MF_CHECKED : 0), ID_MENU_SORT_SIZE, L"Sort by Size");
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_TEXTURE_COUNT ? MF_CHECKED : 0), ID_MENU_SORT_TEXCOUNT, L"Sort by Textures");
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_RESOLUTION ? MF_CHECKED : 0), ID_MENU_SORT_RESOLUTION, L"Sort by Resolution");
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_MIPMAPS ? MF_CHECKED : 0), ID_MENU_SORT_MIPMAPS, L"Sort by Mipmaps");
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_COMPRESSION ? MF_CHECKED : 0), ID_MENU_SORT_COMPRESSION, L"Sort by Compression");
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_MODIFIED ? MF_CHECKED : 0), ID_MENU_SORT_MODIFIED, L"Sort by Modified");
+        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hSortMenu, L"Sort Mode");
+        
+        HMENU hGridMenu = CreatePopupMenu();
+        AppendMenuW(hGridMenu, MF_STRING | (g_grid_index == 0 ? MF_CHECKED : 0), ID_MENU_GRID_SMALL, L"Small Cards");
+        AppendMenuW(hGridMenu, MF_STRING | (g_grid_index == 1 ? MF_CHECKED : 0), ID_MENU_GRID_MEDIUM, L"Medium Cards");
+        AppendMenuW(hGridMenu, MF_STRING | (g_grid_index == 2 ? MF_CHECKED : 0), ID_MENU_GRID_NATIVE, L"Native / Original");
+        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hGridMenu, L"Grid Size");
+        
+        HMENU hEncMenu = CreatePopupMenu();
+        AppendMenuW(hEncMenu, MF_STRING | (!g_app.use_gpu_encoding ? MF_CHECKED : 0), ID_MENU_ENC_CPU, L"Use CPU Encoding");
+        AppendMenuW(hEncMenu, MF_STRING | (g_app.use_gpu_encoding ? MF_CHECKED : 0), ID_MENU_ENC_GPU, L"Use GPU Encoding");
+        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hEncMenu, L"Encoder");
+    }
+    
+    TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, 0, g_app.hwnd_main, NULL);
+    DestroyMenu(hMenu);
+}
+
+static void paint_header(HWND hwnd, HDC hdc) {
+}
+
+static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_SIZE:
+        layout_children();
+        return 0;
+
+    case WM_DROPFILES: {
+        HDROP hDrop = (HDROP)wp;
+        int count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
+        LOG("WM_DROPFILES: %d files", count);
+        if (!select_import_types(hwnd)) {
+            DragFinish(hDrop);
+            return 0;
+        }
+        bool prev_bulk = g_bulk_add;
+        if (count > 1) g_bulk_add = true;   /* dropping many: collapse */
+        for (int i = 0; i < count; i++) {
+            wchar_t path[MAX_PATH];
+            DragQueryFileW(hDrop, i, path, MAX_PATH);
+            if (PathMatchSpecW(path, L"*.ytd;*.wtd;*.ydr;*.yft;*.ydd;*.rpf"))
+                gui_add_ytd(path);
+        }
+        g_bulk_add = prev_bulk;
+        DragFinish(hDrop);
+        return 0;
+    }
+
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        int code = HIWORD(wp);
+        
+        if (code == EN_CHANGE && id == ID_SEARCH_BOX) {
+            wchar_t wbuf[256];
+            GetWindowTextW(g_app.hwnd_search, wbuf, 256);
+            WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, g_app.search_filter, 256, NULL, NULL);
+            InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+            return 0;
+        }
+
+        switch (id) {
+            case ID_SIDEBAR_ADDYTD:
+                open_file_dialog(g_app.hwnd_main);
+                break;
+            case ID_SIDEBAR_ADDFOLDER:
+                open_folder_dialog(g_app.hwnd_main);
+                break;
+            case ID_SIDEBAR_SAVEALL:
+                save_all();
+                break;
+            case ID_SIDEBAR_CLEARALL:
+                LOG("Clear all: freeing %d ytds", g_app.ytd_count);
+                for (int j = 0; j < g_app.ytd_count; j++) ytd_free(g_app.ytds[j]);
+                g_app.ytd_count = 0;
+                reset_migration_state();
+                gui_update_status("");
+                layout_children();
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_EXIT:
+                PostMessage(hwnd, WM_CLOSE, 0, 0);
+                break;
+            case ID_SIDEBAR_DETECT:
+                do_detect_duplicates();
+                break;
+            case ID_SIDEBAR_MIGRATE:
+                do_migrate_duplicates();
+                break;
+            case ID_SIDEBAR_OPTIMIZE:
+                do_smart_optimize();
+                break;
+            case ID_SIDEBAR_FASTRECOMP:
+                do_fast_recompress();
+                break;
+            case ID_MENU_SORT_NAME:
+                g_sort_mode = SORT_BY_NAME;
+                apply_archive_sort();
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_SORT_TYPE:
+                g_sort_mode = SORT_BY_TYPE;
+                apply_archive_sort();
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_SORT_SIZE:
+                g_sort_mode = SORT_BY_SIZE;
+                apply_archive_sort();
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_SORT_TEXCOUNT:
+                g_sort_mode = SORT_BY_TEXTURE_COUNT;
+                apply_archive_sort();
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_SORT_RESOLUTION:
+                g_sort_mode = SORT_BY_RESOLUTION;
+                apply_archive_sort();
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_SORT_MIPMAPS:
+                g_sort_mode = SORT_BY_MIPMAPS;
+                apply_archive_sort();
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_SORT_COMPRESSION:
+                g_sort_mode = SORT_BY_COMPRESSION;
+                apply_archive_sort();
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_SORT_MODIFIED:
+                g_sort_mode = SORT_BY_MODIFIED;
+                apply_archive_sort();
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_GRID_SMALL:
+                g_grid_index = 0;
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_GRID_MEDIUM:
+                g_grid_index = 1;
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_GRID_NATIVE:
+                g_grid_index = 2;
+                InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+                break;
+            case ID_MENU_ENC_CPU:
+                g_app.use_gpu_encoding = false;
+                break;
+            case ID_MENU_ENC_GPU:
+                g_app.use_gpu_encoding = true;
+                break;
+            case ID_MENU_SPONSOR:
+                ShellExecuteW(NULL, L"open", L"https://github.com/LN-Development/EasyOptimizer-V", NULL, NULL, SW_SHOWNORMAL);
+                break;
+            case ID_MENU_ABOUT:
+                MessageBoxW(hwnd, 
+                    L"EasyOptimizer-V by LN-Development\n\n"
+                    L"GTA V Texture Optimization and Management Utility\n"
+                    L"Written in C/C++ with pure Win32 API.\n\n"
+                    L"Special thanks to the OpenIV and FiveM communities.",
+                    L"About EasyOptimizer-V", MB_OK | MB_ICONINFORMATION);
+                break;
+        }
+        return 0;
+    }
+
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lp;
+        if (dis->hwndItem == g_app.hwnd_header)
+            paint_header(dis->hwndItem, dis->hDC);
+        return TRUE;
+    }
+
+    case WM_DESTROY:
+        for (int i = 0; i < g_app.ytd_count; i++)
+            ytd_free(g_app.ytds[i]);
+        free(g_pending_removals);
+        g_pending_removals = NULL;
+        theme_cleanup();
+        CoUninitialize();
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static LRESULT CALLBACK MenuBarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        theme_fill_rect(hdc, &rc, CLR_VS_MENU);
+        
+        SetBkMode(hdc, TRANSPARENT);
+        SelectObject(hdc, theme_font_small());
+        
+        int x = 8;
+        for (int i = 0; i < (int)MENU_ITEM_COUNT; i++) {
+            SIZE sz;
+            GetTextExtentPoint32W(hdc, g_menu_items[i].text, (int)wcslen(g_menu_items[i].text), &sz);
+            int item_w = sz.cx + 16;
+            
+            g_menu_items[i].rc.left = x;
+            g_menu_items[i].rc.top = 0;
+            g_menu_items[i].rc.right = x + item_w;
+            g_menu_items[i].rc.bottom = rc.bottom - 1;
+            
+            COLORREF fill = CLR_VS_MENU;
+            if (i == g_active_menu_idx) {
+                fill = RGB(0xCC, 0xE8, 0xFF);
+            } else if (g_menu_items[i].hovered) {
+                fill = RGB(0xE5, 0xF1, 0xFB);
+            }
+            
+            if (fill != CLR_VS_MENU) {
+                theme_fill_rect(hdc, &g_menu_items[i].rc, fill);
+            }
+            
+            SetTextColor(hdc, CLR_VS_TEXT);
+            RECT txt_rc = g_menu_items[i].rc;
+            DrawTextW(hdc, g_menu_items[i].text, -1, &txt_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            
+            x += item_w;
+        }
+
+        /* Draw Sponsor link on the menu bar */
+        if (!IsRectEmpty(&g_app.rc_sponsor)) {
+            SetTextColor(hdc, g_app.sponsor_hovered ? RGB(0, 0x54, 0xB0) : CLR_VS_ACCENT);
+            DrawTextW(hdc, L"\x2665 Sponsor", -1, &g_app.rc_sponsor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        int mx = GET_X_LPARAM(lp);
+        int my = GET_Y_LPARAM(lp);
+        bool changed = false;
+        POINT pt = {mx, my};
+
+        for (int i = 0; i < (int)MENU_ITEM_COUNT; i++) {
+            bool h = PtInRect(&g_menu_items[i].rc, pt);
+            if (h != g_menu_items[i].hovered) {
+                g_menu_items[i].hovered = h;
+                changed = true;
+            }
+        }
+        
+        bool sph = PtInRect(&g_app.rc_sponsor, pt);
+        if (sph != g_app.sponsor_hovered) {
+            g_app.sponsor_hovered = sph;
+            changed = true;
+        }
+
+        if (changed) {
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+
+        TRACKMOUSEEVENT tme = { sizeof(tme) };
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd;
+        TrackMouseEvent(&tme);
+        return 0;
+    }
+    case WM_MOUSELEAVE: {
+        bool changed = false;
+        for (int i = 0; i < (int)MENU_ITEM_COUNT; i++) {
+            if (g_menu_items[i].hovered) {
+                g_menu_items[i].hovered = false;
+                changed = true;
+            }
+        }
+        if (g_app.sponsor_hovered) {
+            g_app.sponsor_hovered = false;
+            changed = true;
+        }
+        if (changed) {
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        int mx = GET_X_LPARAM(lp);
+        int my = GET_Y_LPARAM(lp);
+        POINT pt = {mx, my};
+        
+        if (PtInRect(&g_app.rc_sponsor, pt)) {
+            ShellExecuteW(NULL, L"open", L"https://github.com/LN-Development/EasyOptimizer-V", NULL, NULL, SW_SHOWNORMAL);
+            return 0;
+        }
+        
+        for (int i = 0; i < (int)MENU_ITEM_COUNT; i++) {
+            if (PtInRect(&g_menu_items[i].rc, pt)) {
+                g_active_menu_idx = i;
+                InvalidateRect(hwnd, NULL, FALSE);
+                UpdateWindow(hwnd);
+                show_menu_dropdown(hwnd, i);
+                g_active_menu_idx = -1;
+                InvalidateRect(hwnd, NULL, FALSE);
+                break;
+            }
+        }
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
 static void paint_content(HWND hwnd, HDC hdc) {
     RECT rc;
     GetClientRect(hwnd, &rc);
@@ -2866,6 +3456,7 @@ static void paint_content(HWND hwnd, HDC hdc) {
     DeleteObject(bg);
 
     if (g_app.ytd_count == 0) {
+        ShowScrollBar(hwnd, SB_VERT, FALSE);
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, CLR_TEXT_SECONDARY);
         SelectObject(hdc, theme_font_title());
@@ -2916,8 +3507,7 @@ static void paint_content(HWND hwnd, HDC hdc) {
 
     g_app.content_height = y + g_app.scroll_y;
 
-    /* Clamp scroll to valid range; if the view was scrolled past the (now
-     * shorter) content, snap back and repaint so cards don't render off-screen. */
+    /* Clamp scroll to valid range */
     {
         int max_scroll = g_app.content_height - rc.bottom;
         if (max_scroll < 0) max_scroll = 0;
@@ -2934,188 +3524,151 @@ static void paint_content(HWND hwnd, HDC hdc) {
     si.nMax = g_app.content_height;
     si.nPage = rc.bottom;
     SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
+    ShowScrollBar(hwnd, SB_VERT, g_app.content_height > rc.bottom);
 }
 
-/* ── Sidebar painting ──────────────────────────────────────────────── */
+static bool toolbar_button_enabled(int id) {
+    if (id == ID_SIDEBAR_ADDYTD || id == ID_SIDEBAR_ADDFOLDER)
+        return true;
+    if (id == ID_SIDEBAR_MIGRATE)
+        return g_has_pending_migration;
+    return g_app.ytd_count > 0;
+}
+
+static void toolbar_command(HWND hwnd, int id) {
+    if (!toolbar_button_enabled(id))
+        return;
+    SendMessageW(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(id, 0), 0);
+}
+
+static void toolbar_draw_icon(HDC hdc, RECT rc, int id, bool enabled) {
+    COLORREF stroke = enabled ? RGB(0x34, 0x34, 0x34) : CLR_VS_TEXT_DISABLED;
+    COLORREF accent = enabled ? CLR_VS_ACCENT : CLR_VS_TEXT_DISABLED;
+    COLORREF green = enabled ? RGB(0x76, 0xB9, 0x00) : CLR_VS_TEXT_DISABLED;
+    HPEN pen = CreatePen(PS_SOLID, 1, stroke);
+    HPEN old_pen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH old_brush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    int x = rc.left, y = rc.top;
+    if (id == ID_SIDEBAR_ADDYTD || id == ID_SIDEBAR_ADDFOLDER) {
+        HBRUSH folder = CreateSolidBrush(enabled ? RGB(0xE8, 0xC2, 0x4A) : RGB(0xD0, 0xD0, 0xD0));
+        RECT tab = {x + 1, y + 3, x + 7, y + 7};
+        RECT body = {x + 1, y + 6, x + 15, y + 14};
+        FillRect(hdc, &tab, folder);
+        FillRect(hdc, &body, folder);
+        DeleteObject(folder);
+        Rectangle(hdc, x + 1, y + 3, x + 15, y + 14);
+        if (id == ID_SIDEBAR_ADDYTD) {
+            HPEN blue = CreatePen(PS_SOLID, 1, accent);
+            HPEN prev = (HPEN)SelectObject(hdc, blue);
+            MoveToEx(hdc, x + 11, y + 1, NULL); LineTo(hdc, x + 11, y + 8);
+            MoveToEx(hdc, x + 8, y + 4, NULL); LineTo(hdc, x + 15, y + 4);
+            SelectObject(hdc, prev);
+            DeleteObject(blue);
+        }
+    } else if (id == ID_SIDEBAR_SAVEALL) {
+        Rectangle(hdc, x + 2, y + 1, x + 14, y + 15);
+        MoveToEx(hdc, x + 4, y + 3, NULL); LineTo(hdc, x + 11, y + 3);
+        Rectangle(hdc, x + 5, y + 9, x + 12, y + 14);
+    } else if (id == ID_SIDEBAR_CLEARALL) {
+        MoveToEx(hdc, x + 3, y + 3, NULL); LineTo(hdc, x + 13, y + 13);
+        MoveToEx(hdc, x + 13, y + 3, NULL); LineTo(hdc, x + 3, y + 13);
+    } else if (id == ID_SIDEBAR_DETECT) {
+        Ellipse(hdc, x + 2, y + 2, x + 11, y + 11);
+        MoveToEx(hdc, x + 10, y + 10, NULL); LineTo(hdc, x + 15, y + 15);
+    } else if (id == ID_SIDEBAR_MIGRATE) {
+        MoveToEx(hdc, x + 2, y + 8, NULL); LineTo(hdc, x + 13, y + 8);
+        MoveToEx(hdc, x + 10, y + 5, NULL); LineTo(hdc, x + 14, y + 8);
+        LineTo(hdc, x + 10, y + 11);
+    } else if (id == ID_SIDEBAR_OPTIMIZE) {
+        HPEN gp = CreatePen(PS_SOLID, 1, green);
+        HPEN prev = (HPEN)SelectObject(hdc, gp);
+        Rectangle(hdc, x + 2, y + 2, x + 14, y + 14);
+        MoveToEx(hdc, x + 5, y + 10, NULL); LineTo(hdc, x + 8, y + 5);
+        LineTo(hdc, x + 11, y + 10);
+        SelectObject(hdc, prev);
+        DeleteObject(gp);
+    } else if (id == ID_SIDEBAR_FASTRECOMP) {
+        MoveToEx(hdc, x + 4, y + 2, NULL); LineTo(hdc, x + 12, y + 2);
+        LineTo(hdc, x + 8, y + 8);
+        LineTo(hdc, x + 13, y + 8);
+        LineTo(hdc, x + 5, y + 15);
+    }
+
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    DeleteObject(pen);
+}
 
 static void paint_sidebar(HWND hwnd, HDC hdc) {
     RECT rc;
     GetClientRect(hwnd, &rc);
-
-    HBRUSH bg = CreateSolidBrush(CLR_SURFACE_DARK);
-    FillRect(hdc, &rc, bg);
-    DeleteObject(bg);
+    theme_fill_rect(hdc, &rc, CLR_VS_SIDEBAR);
 
     SetBkMode(hdc, TRANSPARENT);
+    SelectObject(hdc, theme_font_small());
 
-    /* Draw sidebar buttons */
+    int x = 8;
+    RECT search_rc = {0};
+    int search_left = rc.right - 8;
+    if (g_app.hwnd_search) {
+        GetWindowRect(g_app.hwnd_search, &search_rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&search_rc, 2);
+        search_left = search_rc.left - 12;
+    }
     for (int i = 0; i < (int)SIDEBAR_BTN_COUNT; i++) {
         SidebarButton *btn = &g_sidebar_btns[i];
-        if (!btn->visible) continue;
-        HBRUSH fill;
-        if (btn->id == ID_SIDEBAR_ADDYTD || btn->id == ID_SIDEBAR_ADDFOLDER)
-            fill = CreateSolidBrush(btn->hovered ? 0x00339933 : CLR_PRIMARY);
+        if (!btn->visible) {
+            SetRectEmpty(&btn->rc);
+            continue;
+        }
+
+        SIZE ts;
+        GetTextExtentPoint32W(hdc, btn->text, (int)wcslen(btn->text), &ts);
+        int bw = ts.cx + 30;
+        if (bw < 48) bw = 48;
+        if (btn->id == ID_SIDEBAR_DETECT || btn->id == ID_SIDEBAR_OPTIMIZE) bw += 6;
+        if (x + bw + 8 > search_left) {
+            SetRectEmpty(&btn->rc);
+            continue;
+        }
+
+        btn->rc.left = x;
+        btn->rc.top = 5;
+        btn->rc.right = x + bw;
+        btn->rc.bottom = 27;
+
+        bool enabled = toolbar_button_enabled(btn->id);
+        COLORREF fill = CLR_VS_SIDEBAR;
+        COLORREF border = CLR_VS_SIDEBAR;
+        if (!enabled) {
+            fill = CLR_VS_SIDEBAR;
+        } else if (btn->hovered) {
+            fill = CLR_VS_BTN_HOVER_BG;
+            border = CLR_VS_BTN_HOVER_BDR;
+        }
+        if (btn->hovered && enabled)
+            theme_flat_rect(hdc, &btn->rc, fill, border);
         else
-            fill = CreateSolidBrush(btn->hovered ? CLR_HOVER : CLR_BUTTON_BG);
+            theme_fill_rect(hdc, &btn->rc, fill);
 
-        HPEN pen = CreatePen(PS_SOLID, 1, CLR_BORDER_DARK);
-        HPEN oldPen = (HPEN)SelectObject(hdc, pen);
-        HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fill);
-        RoundRect(hdc, btn->rc.left, btn->rc.top, btn->rc.right, btn->rc.bottom, 8, 8);
-        SelectObject(hdc, oldPen);
-        SelectObject(hdc, oldBrush);
-        DeleteObject(pen);
-        DeleteObject(fill);
+        int icon_y = btn->rc.top + ((btn->rc.bottom - btn->rc.top) - 16) / 2;
+        RECT icon = {btn->rc.left + 4, icon_y, btn->rc.left + 20, icon_y + 16};
+        toolbar_draw_icon(hdc, icon, btn->id, enabled);
 
-        SetTextColor(hdc, CLR_TEXT_PRIMARY);
-        SelectObject(hdc, theme_font_small_bold());
-        RECT txt_rc = btn->rc;
-        DrawTextW(hdc, btn->text, -1, &txt_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
+        RECT text = btn->rc;
+        text.left += 24;
+        text.right -= 4;
+        SetTextColor(hdc, enabled ? CLR_VS_TEXT : CLR_VS_TEXT_DISABLED);
+        DrawTextW(hdc, btn->text, -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    /* File list below buttons */
-    int visible_btns = 0;
-    for (int i = 0; i < (int)SIDEBAR_BTN_COUNT; i++)
-        if (g_sidebar_btns[i].visible) visible_btns++;
-    int y = 16 + visible_btns * 44 + 16;
-    if (g_app.ytd_count > 0) {
-        /* Count top-level entries (RPF entries are listed under their group, not here). */
-        int total_top = 0;
-        for (int i = 0; i < g_app.ytd_count; i++)
-            if (!g_app.ytds[i]->from_rpf) total_top++;
-
-        SetTextColor(hdc, CLR_TEXT_SECONDARY);
-        SelectObject(hdc, theme_font_small());
-        wchar_t hdr[64];
-        _snwprintf(hdr, 64, L"LOADED FILES (%d)", total_top);
-        RECT label_rc = {12, y, SIDEBAR_WIDTH - 12, y + 20};
-        DrawTextW(hdc, hdr, -1, &label_rc, DT_LEFT | DT_SINGLELINE);
-        y += 24;
-
-        SetTextColor(hdc, CLR_TEXT_PRIMARY);
-        SelectObject(hdc, theme_font_small());
-        int shown = 0;
-        for (int i = 0; i < g_app.ytd_count; i++) {
-            YtdFile *a = g_app.ytds[i];
-            if (a->from_rpf) continue;   /* entries shown nested in the content view */
-
-            /* Stop before running off the bottom; leave room for Sponsor btn + "+N more" */
-            if (y + 18 > rc.bottom - 58) {
-                int remaining = total_top - shown;
-                if (remaining > 0) {
-                    SetTextColor(hdc, CLR_TEXT_SECONDARY);
-                    wchar_t more[48];
-                    _snwprintf(more, 48, L"+ %d more...", remaining);
-                    RECT more_rc = {16, y, SIDEBAR_WIDTH - 8, y + 18};
-                    DrawTextW(hdc, more, -1, &more_rc, DT_LEFT | DT_SINGLELINE);
-                }
-                break;
-            }
-
-            wchar_t wname[256];
-            MultiByteToWideChar(CP_UTF8, 0, a->name, -1, wname, 256);
-            wchar_t line[300];
-            if (a->is_rpf_group)
-                _snwprintf(line, 300, L"%s (RPF)", wname);
-            else
-                _snwprintf(line, 300, L"%s (%d tex)", wname, a->texture_count);
-            RECT item_rc = {16, y, SIDEBAR_WIDTH - 8, y + 18};
-            DrawTextW(hdc, line, -1, &item_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-            y += 20;
-            shown++;
+        x += bw + 4;
+        if (i == 1 || i == 3) {
+            RECT sep = {x + 1, 7, x + 2, 25};
+            theme_fill_rect(hdc, &sep, CLR_VS_BORDER_PANEL);
+            x += 7;
         }
     }
-
-    /* ── Sponsor button — pinned to the bottom of the sidebar ──────── */
-    {
-        RECT btn = {8, rc.bottom - 40, SIDEBAR_WIDTH - 8, rc.bottom - 8};
-        HBRUSH fill = CreateSolidBrush(RGB(0x1F, 0x6F, 0xEB));   /* GitHub-blue */
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(0x1A, 0x5E, 0xCC));
-        HPEN oldP = (HPEN)SelectObject(hdc, pen);
-        HBRUSH oldB = (HBRUSH)SelectObject(hdc, fill);
-        RoundRect(hdc, btn.left, btn.top, btn.right, btn.bottom, 8, 8);
-        SelectObject(hdc, oldP); SelectObject(hdc, oldB);
-        DeleteObject(pen); DeleteObject(fill);
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, CLR_TEXT_PRIMARY);
-        SelectObject(hdc, theme_font_small_bold());
-        DrawTextW(hdc, L"♥  Sponsor", -1, &btn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-}
-
-/* ── Header painting ───────────────────────────────────────────────── */
-
-static void paint_header(HWND hwnd, HDC hdc) {
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-
-    HBRUSH bg = CreateSolidBrush(CLR_SURFACE_DARK);
-    FillRect(hdc, &rc, bg);
-    DeleteObject(bg);
-
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, CLR_TEXT_PRIMARY);
-    SelectObject(hdc, theme_font_title());
-    RECT title_rc = {16, 0, 190, HEADER_HEIGHT};
-    DrawTextW(hdc, L"EasyOptimizer-V", -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-}
-
-/* ── Window procedures ─────────────────────────────────────────────── */
-
-static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-    case WM_SIZE:
-        layout_children();
-        return 0;
-
-    case WM_DROPFILES: {
-        HDROP hDrop = (HDROP)wp;
-        int count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
-        LOG("WM_DROPFILES: %d files", count);
-        if (!select_import_types(hwnd)) {
-            DragFinish(hDrop);
-            return 0;
-        }
-        bool prev_bulk = g_bulk_add;
-        if (count > 1) g_bulk_add = true;   /* dropping many: collapse */
-        for (int i = 0; i < count; i++) {
-            wchar_t path[MAX_PATH];
-            DragQueryFileW(hDrop, i, path, MAX_PATH);
-            if (PathMatchSpecW(path, L"*.ytd;*.wtd;*.ydr;*.yft;*.ydd;*.rpf"))
-                gui_add_ytd(path);
-        }
-        g_bulk_add = prev_bulk;
-        DragFinish(hDrop);
-        return 0;
-    }
-
-    case WM_COMMAND:
-        if (HIWORD(wp) == EN_CHANGE && LOWORD(wp) == ID_SEARCH_BOX) {
-            wchar_t wbuf[256];
-            GetWindowTextW(g_app.hwnd_search, wbuf, 256);
-            WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, g_app.search_filter, 256, NULL, NULL);
-            InvalidateRect(g_app.hwnd_content, NULL, TRUE);
-        }
-        return 0;
-
-    case WM_DRAWITEM: {
-        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lp;
-        if (dis->hwndItem == g_app.hwnd_header)
-            paint_header(dis->hwndItem, dis->hDC);
-        return TRUE;
-    }
-
-    case WM_DESTROY:
-        for (int i = 0; i < g_app.ytd_count; i++)
-            ytd_free(g_app.ytds[i]);
-        free(g_pending_removals);
-        g_pending_removals = NULL;
-        theme_cleanup();
-        CoUninitialize();
-        PostQuitMessage(0);
-        return 0;
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 static LRESULT CALLBACK ContentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -3214,8 +3767,8 @@ static LRESULT CALLBACK ContentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                     YtdFile *child = g_app.ytds[c];
                     if (child->rpf_parent != ytd) continue;
                     if (my >= y && my < y + RPF_ENTRY_H) {
-                        int unload_left = area_w - 116, unload_right = area_w - 56;
-                        int dds_left = area_w - 184, dds_right = area_w - 124;
+                        int unload_left = area_w - 108, unload_right = area_w - 48;
+                        int dds_left = area_w - 184, dds_right = area_w - 116;
                         if (mx >= unload_left && mx <= unload_right &&
                             my >= y + 9 && my <= y + 33) {
                             unload_rpf_archive(c);
@@ -3278,6 +3831,15 @@ static LRESULT CALLBACK ContentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
 static LRESULT CALLBACK SidebarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_COMMAND:
+        if (LOWORD(wp) == ID_SEARCH_BOX && HIWORD(wp) == EN_CHANGE) {
+            wchar_t wbuf[256];
+            GetWindowTextW(g_app.hwnd_search, wbuf, 256);
+            WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, g_app.search_filter, 256, NULL, NULL);
+            InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+            return 0;
+        }
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
@@ -3285,95 +3847,141 @@ static LRESULT CALLBACK SidebarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         EndPaint(hwnd, &ps);
         return 0;
     }
-
-    case WM_LBUTTONDOWN: {
-        int mx = GET_X_LPARAM(lp);
-        int my = GET_Y_LPARAM(lp);
-
-        /* Sponsor button pinned to sidebar bottom */
-        {
-            RECT sb_rc;
-            GetClientRect(hwnd, &sb_rc);
-            RECT btn = {8, sb_rc.bottom - 40, SIDEBAR_WIDTH - 8, sb_rc.bottom - 8};
-            POINT pt = {mx, my};
-            if (PtInRect(&btn, pt)) {
-                ShellExecuteW(NULL, L"open",
-                    L"https://github.com/LN-Development/EasyOptimizer-V",
-                    NULL, NULL, SW_SHOWNORMAL);
-                return 0;
-            }
-        }
-
-        for (int i = 0; i < (int)SIDEBAR_BTN_COUNT; i++) {
-            if (!g_sidebar_btns[i].visible) continue;
-            POINT pt = {mx, my};
-            if (PtInRect(&g_sidebar_btns[i].rc, pt)) {
-                switch (g_sidebar_btns[i].id) {
-                    case ID_SIDEBAR_ADDYTD:   open_file_dialog(g_app.hwnd_main); break;
-                    case ID_SIDEBAR_SAVEALL:  save_all(); break;
-                    case ID_SIDEBAR_CLEARALL:
-                        LOG("Clear all: freeing %d ytds", g_app.ytd_count);
-                        for (int j = 0; j < g_app.ytd_count; j++) ytd_free(g_app.ytds[j]);
-                        g_app.ytd_count = 0;
-                        reset_migration_state();
-                        gui_update_status("All files cleared");
-                        InvalidateRect(g_app.hwnd_content, NULL, TRUE);
-                        InvalidateRect(hwnd, NULL, TRUE);
-                        break;
-                    case ID_SIDEBAR_DETECT:  do_detect_duplicates(); break;
-                    case ID_SIDEBAR_MIGRATE: do_migrate_duplicates(); break;
-                    case ID_SIDEBAR_OPTIMIZE: do_smart_optimize(); break;
-                    case ID_SIDEBAR_FASTRECOMP: choose_recompress_mode(); break;
-                    case ID_SIDEBAR_ADDFOLDER:  open_folder_dialog(g_app.hwnd_main); break;
-                    case ID_SIDEBAR_TOGGLE_ENC:
-                        g_app.use_gpu_encoding = !g_app.use_gpu_encoding;
-                        log_encoder_intent("Encoder toggled");
-                        update_sidebar_labels();
-                        InvalidateRect(hwnd, NULL, TRUE);
-                        break;
-                    case ID_SIDEBAR_LANGUAGE: select_language(); break;
-                    case ID_SIDEBAR_SORT:
-                        g_sort_mode = (ArchiveSortMode)((g_sort_mode + 1) % 8);
-                        apply_archive_sort();
-                        update_sidebar_labels();
-                        InvalidateRect(g_app.hwnd_content, NULL, TRUE);
-                        InvalidateRect(hwnd, NULL, TRUE);
-                        break;
-                    case ID_SIDEBAR_GRID:
-                        g_grid_index = (g_grid_index + 1) % 3;   /* Small -> Medium -> Native */
-                        g_app.scroll_y = 0;                      /* card sizes changed; reset view */
-                        update_sidebar_labels();
-                        InvalidateRect(g_app.hwnd_content, NULL, TRUE);
-                        InvalidateRect(hwnd, NULL, TRUE);
-                        break;
-                }
-                return 0;
-            }
-        }
-        return 0;
-    }
-
     case WM_MOUSEMOVE: {
-        int mx = GET_X_LPARAM(lp);
-        int my = GET_Y_LPARAM(lp);
+        POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         bool changed = false;
         for (int i = 0; i < (int)SIDEBAR_BTN_COUNT; i++) {
-            POINT pt = {mx, my};
-            bool h = (g_sidebar_btns[i].visible && PtInRect(&g_sidebar_btns[i].rc, pt)) ? true : false;
-            if (h != g_sidebar_btns[i].hovered) { g_sidebar_btns[i].hovered = h; changed = true; }
+            SidebarButton *btn = &g_sidebar_btns[i];
+            bool h = !IsRectEmpty(&btn->rc) && toolbar_button_enabled(btn->id) && PtInRect(&btn->rc, pt);
+            if (h != btn->hovered) {
+                btn->hovered = h;
+                changed = true;
+            }
         }
         if (changed) InvalidateRect(hwnd, NULL, FALSE);
-
-        TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
+        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
         TrackMouseEvent(&tme);
         return 0;
     }
-
     case WM_MOUSELEAVE:
-        for (int i = 0; i < (int)SIDEBAR_BTN_COUNT; i++) g_sidebar_btns[i].hovered = false;
+        for (int i = 0; i < (int)SIDEBAR_BTN_COUNT; i++)
+            g_sidebar_btns[i].hovered = false;
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
+    case WM_LBUTTONDOWN: {
+        POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        for (int i = 0; i < (int)SIDEBAR_BTN_COUNT; i++) {
+            SidebarButton *btn = &g_sidebar_btns[i];
+            if (!IsRectEmpty(&btn->rc) && PtInRect(&btn->rc, pt)) {
+                toolbar_command(hwnd, btn->id);
+                return 0;
+            }
+        }
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
 
+static LRESULT CALLBACK StatusBarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        theme_fill_rect(hdc, &rc, CLR_VS_STATUS);
+        
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(255, 255, 255));
+        SelectObject(hdc, theme_font_small());
+        
+        wchar_t text[512] = {0};
+        GetWindowTextW(hwnd, text, 512);
+        
+        RECT text_rc = rc;
+        text_rc.left += 8;
+        DrawTextW(hdc, text, -1, &text_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case SB_SETTEXTW: {
+        if (lp) {
+            SetWindowTextW(hwnd, (const wchar_t*)lp);
+        } else {
+            SetWindowTextW(hwnd, L"");
+        }
+        InvalidateRect(hwnd, NULL, TRUE);
+        return TRUE;
+    }
+    case WM_SETTEXT: {
+        LRESULT res = DefWindowProcW(hwnd, msg, wp, lp);
+        InvalidateRect(hwnd, NULL, TRUE);
+        return res;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static LRESULT CALLBACK TotalsBarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+
+        theme_fill_rect(hdc, &rc, CLR_VS_EDITOR);
+        RECT top = {0, 0, rc.right, 1};
+        theme_fill_rect(hdc, &top, CLR_VS_BORDER_ELEM);
+
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, CLR_VS_TEXT);
+        SelectObject(hdc, theme_font_small());
+
+        int top_files = 0;
+        int resources = 0;
+        size_t total_bytes = 0;
+        for (int i = 0; i < g_app.ytd_count; i++) {
+            YtdFile *ytd = g_app.ytds[i];
+            if (!ytd) continue;
+            if (!ytd->from_rpf) top_files++;
+            if (!ytd->is_rpf_group) resources += ytd->texture_count;
+            if (ytd->textures) {
+                for (int t = 0; t < ytd->texture_count; t++)
+                    total_bytes += ytd->textures[t].data_size;
+            }
+        }
+
+        wchar_t files[64], res[64], bytes[96];
+        _snwprintf(files, 64, L"%d Files", top_files);
+        _snwprintf(res, 64, L"%d Resources", resources);
+        _snwprintf(bytes, 96, L"%I64u Bytes", (unsigned __int64)total_bytes);
+
+        RECT label = {24, 0, 120, rc.bottom};
+        DrawTextW(hdc, L"Totals:", -1, &label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT col1 = {360, 0, 520, rc.bottom};
+        RECT col2 = {520, 0, 680, rc.bottom};
+        RECT col3 = {680, 0, 860, rc.bottom};
+        RECT sep1 = {col1.left - 1, 0, col1.left, rc.bottom};
+        RECT sep2 = {col2.left - 1, 0, col2.left, rc.bottom};
+        RECT sep3 = {col3.left - 1, 0, col3.left, rc.bottom};
+        theme_fill_rect(hdc, &sep1, CLR_VS_BORDER_PANEL);
+        theme_fill_rect(hdc, &sep2, CLR_VS_BORDER_PANEL);
+        theme_fill_rect(hdc, &sep3, CLR_VS_BORDER_PANEL);
+        DrawTextW(hdc, files, -1, &col1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, res, -1, &col2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, bytes, -1, &col3, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
     case WM_ERASEBKGND:
         return 1;
     }

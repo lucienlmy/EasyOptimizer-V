@@ -29,17 +29,11 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd,
                        YtdFile **all_archives, int archive_count, bool hovered) {
     RECT rc = {x, y, x + w, y + 56};
 
-    HBRUSH fill = CreateSolidBrush(hovered ? CLR_HOVER : CLR_SURFACE_DARK);
+    /* VS2012 flat card: solid fill with 1px square border. */
+    COLORREF fill_clr = hovered ? CLR_VS_ACCENT_HOVER : CLR_VS_SIDEBAR;
     COLORREF border_clr = ytd->is_preview ? RGB(230, 160, 30)
-                                          : (ytd->expanded ? CLR_PRIMARY : CLR_BORDER_DARK);
-    HPEN pen = CreatePen(PS_SOLID, ytd->is_preview ? 2 : 1, border_clr);
-    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fill);
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 12, 12);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(fill);
+                                          : (ytd->expanded ? CLR_VS_ACCENT : CLR_VS_BORDER_PANEL);
+    theme_flat_rect(hdc, &rc, fill_clr, border_clr);
 
     /* Folder icon (simple colored rectangle) */
     COLORREF icon_clr = CLR_PRIMARY;
@@ -84,53 +78,31 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd,
     if (ytd->is_preview) {
         RECT btn = {x + w - 130, y + 16, x + w - 44, y + 40};
         bool on = ytd->keep_originals;
-        HBRUSH bfill = CreateSolidBrush(on ? RGB(0x16, 0xA3, 0x4A) : RGB(60, 60, 60));
-        HPEN bpen = CreatePen(PS_SOLID, 1, on ? RGB(0x4A, 0xDE, 0x80) : CLR_BORDER_DARK);
-        HPEN oldP = (HPEN)SelectObject(hdc, bpen);
-        HBRUSH oldB = (HBRUSH)SelectObject(hdc, bfill);
-        RoundRect(hdc, btn.left, btn.top, btn.right, btn.bottom, 6, 6);
-        SelectObject(hdc, oldP);
-        SelectObject(hdc, oldB);
-        DeleteObject(bpen);
-        DeleteObject(bfill);
-        SetTextColor(hdc, CLR_TEXT_PRIMARY);
+        COLORREF bf = on ? RGB(0x16, 0xA3, 0x4A) : CLR_VS_BTN_BG;
+        COLORREF bb = on ? RGB(0x4A, 0xDE, 0x80) : CLR_VS_BORDER_ELEM;
+        theme_flat_rect(hdc, &btn, bf, bb);
+        SetTextColor(hdc, on ? RGB(255, 255, 255) : CLR_VS_TEXT);
         SelectObject(hdc, theme_font_small_bold());
         DrawTextW(hdc, on ? L"Keeping" : L"Maintain", -1, &btn,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     } else if (ytd->from_rpf) {
         RECT btn = {x + w - 116, y + 16, x + w - 44, y + 40};
-        HBRUSH bfill = CreateSolidBrush(RGB(120, 45, 45));
-        HPEN bpen = CreatePen(PS_SOLID, 1, RGB(210, 90, 90));
-        HPEN oldP = (HPEN)SelectObject(hdc, bpen);
-        HBRUSH oldB = (HBRUSH)SelectObject(hdc, bfill);
-        RoundRect(hdc, btn.left, btn.top, btn.right, btn.bottom, 6, 6);
-        SelectObject(hdc, oldP);
-        SelectObject(hdc, oldB);
-        DeleteObject(bpen);
-        DeleteObject(bfill);
-        SetTextColor(hdc, CLR_TEXT_PRIMARY);
+        theme_flat_rect(hdc, &btn, CLR_VS_BTN_BG, CLR_VS_BTN_BORDER);
+        SetTextColor(hdc, RGB(0x8A, 0x1F, 0x1F));
         SelectObject(hdc, theme_font_small_bold());
         DrawTextW(hdc, L"Unload", -1, &btn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    /* "DDS" export button (every regular/file card with textures), placed next
+    /* Export button (every regular/file card with textures), placed next
      * to the Unload slot. Exports all of this archive's textures to a folder. */
     if (!ytd->is_preview && !ytd->is_rpf_group && ytd->texture_count > 0) {
         int ddr = ytd->from_rpf ? (w - 124) : (w - 44);
-        int ddl = ddr - 56;
+        int ddl = ddr - 68;
         RECT db = {x + ddl, y + 16, x + ddr, y + 40};
-        HBRUSH dfill = CreateSolidBrush(RGB(40, 96, 64));
-        HPEN dpen = CreatePen(PS_SOLID, 1, RGB(80, 170, 120));
-        HPEN oldP = (HPEN)SelectObject(hdc, dpen);
-        HBRUSH oldB = (HBRUSH)SelectObject(hdc, dfill);
-        RoundRect(hdc, db.left, db.top, db.right, db.bottom, 6, 6);
-        SelectObject(hdc, oldP);
-        SelectObject(hdc, oldB);
-        DeleteObject(dpen);
-        DeleteObject(dfill);
-        SetTextColor(hdc, CLR_TEXT_PRIMARY);
+        theme_flat_rect(hdc, &db, CLR_VS_BTN_BG, CLR_VS_BTN_BORDER);
+        SetTextColor(hdc, RGB(0x1F, 0x6B, 0x3A));
         SelectObject(hdc, theme_font_small_bold());
-        DrawTextW(hdc, L"DDS", -1, &db, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, L"Export", -1, &db, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
     /* Expand arrow */
@@ -143,15 +115,8 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd,
 
 void gui_draw_rpf_entry_row(HDC hdc, int x, int y, int w, YtdFile *ytd) {
     RECT rc = {x, y, x + w, y + RPF_ENTRY_H};
-    HBRUSH fill = CreateSolidBrush(RGB(30, 34, 39));
-    HPEN pen = CreatePen(PS_SOLID, 1, CLR_BORDER_DARK);
-    HPEN old_pen = (HPEN)SelectObject(hdc, pen);
-    HBRUSH old_brush = (HBRUSH)SelectObject(hdc, fill);
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
-    SelectObject(hdc, old_pen);
-    SelectObject(hdc, old_brush);
-    DeleteObject(pen);
-    DeleteObject(fill);
+    /* VS2012 flat row: dark surface + panel border */
+    theme_flat_rect(hdc, &rc, CLR_VS_MAIN, CLR_VS_BORDER_PANEL);
 
     wchar_t name[EO_MAX_NAME];
     MultiByteToWideChar(CP_UTF8, 0, ytd->name, -1, name, EO_MAX_NAME);
@@ -175,22 +140,18 @@ void gui_draw_rpf_entry_row(HDC hdc, int x, int y, int w, YtdFile *ytd) {
     DrawTextW(hdc, info, -1, &info_rc, DT_LEFT | DT_SINGLELINE);
 
     RECT unload = {x + w - 108, y + 9, x + w - 48, y + 33};
-    HBRUSH unload_fill = CreateSolidBrush(RGB(120, 45, 45));
-    FillRect(hdc, &unload, unload_fill);
-    DeleteObject(unload_fill);
-    SetTextColor(hdc, CLR_TEXT_PRIMARY);
+    theme_flat_rect(hdc, &unload, CLR_VS_BTN_BG, CLR_VS_BTN_BORDER);
+    SetTextColor(hdc, RGB(0x8A, 0x1F, 0x1F));
     SelectObject(hdc, theme_font_small_bold());
     DrawTextW(hdc, L"Unload", -1, &unload, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    /* "DDS" export button, left of Unload. */
+    /* Export button, left of Unload. */
     if (ytd->texture_count > 0) {
-        RECT db = {x + w - 176, y + 9, x + w - 116, y + 33};
-        HBRUSH dfill = CreateSolidBrush(RGB(40, 96, 64));
-        FillRect(hdc, &db, dfill);
-        DeleteObject(dfill);
-        SetTextColor(hdc, CLR_TEXT_PRIMARY);
+        RECT db = {x + w - 184, y + 9, x + w - 116, y + 33};
+        theme_flat_rect(hdc, &db, CLR_VS_BTN_BG, CLR_VS_BTN_BORDER);
+        SetTextColor(hdc, RGB(0x1F, 0x6B, 0x3A));
         SelectObject(hdc, theme_font_small_bold());
-        DrawTextW(hdc, L"DDS", -1, &db, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, L"Export", -1, &db, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
     SetTextColor(hdc, CLR_TEXT_PRIMARY);
@@ -206,25 +167,16 @@ void gui_draw_texture_card(HDC hdc, int x, int y, int card_w, int card_h,
                            TextureEntry *tex, YtdFile *parent, bool hovered) {
     RECT rc = {x, y, x + card_w, y + card_h};
 
-    /* Card background */
-    HBRUSH fill = CreateSolidBrush(CLR_SURFACE_DARK);
-    HPEN pen = CreatePen(PS_SOLID, 1, hovered ? CLR_PRIMARY : CLR_BORDER_DARK);
-    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fill);
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 12, 12);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(fill);
+    /* VS2012 flat card: square, 1px border, accent on hover */
+    COLORREF bdr = hovered ? CLR_VS_ACCENT : CLR_VS_BORDER_PANEL;
+    theme_flat_rect(hdc, &rc, CLR_VS_SIDEBAR, bdr);
 
     int footer_h = 80;
     int img_h = card_h - footer_h;
 
-    /* Image area (black background) */
+    /* Image area (VS2012 editor-dark background) */
     RECT img_rc = {x + 1, y + 1, x + card_w - 1, y + img_h};
-    HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
-    FillRect(hdc, &img_rc, black);
-    DeleteObject(black);
+    theme_fill_rect(hdc, &img_rc, CLR_VS_EDITOR);
 
     /* Decode and draw texture preview */
     int tw = 0, th = 0;
@@ -273,10 +225,9 @@ void gui_draw_texture_card(HDC hdc, int x, int y, int card_w, int card_h,
 
     RECT badge_rc = {x + card_w - fmtSize.cx - 16, y + 6,
                      x + card_w - 6, y + 6 + fmtSize.cy + 4};
-    HBRUSH badge_bg = CreateSolidBrush(RGB(0, 0, 0));
-    FillRect(hdc, &badge_rc, badge_bg);
-    DeleteObject(badge_bg);
-    SetTextColor(hdc, CLR_TEXT_PRIMARY);
+    /* VS2012 accent badge: dark menu bg + accent border for a polished look. */
+    theme_flat_rect(hdc, &badge_rc, CLR_VS_MENU, CLR_VS_BORDER_PANEL);
+    SetTextColor(hdc, CLR_VS_KEYWORD);
     DrawTextW(hdc, wfmt, -1, &badge_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     /* Footer: name, size, dimensions, mips */
@@ -323,14 +274,10 @@ void gui_draw_texture_card(HDC hdc, int x, int y, int card_w, int card_h,
     RECT parent_rc = {text_x, text_y, x + card_w - 12, text_y + 14};
     DrawTextW(hdc, wparent, -1, &parent_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    /* Edit Button (mimic old tool) */
+    /* VS2012 flat Edit button */
     RECT edit_rc = {x + card_w - 62, y + card_h - 32, x + card_w - 12, y + card_h - 12};
-    HBRUSH edit_bg = CreateSolidBrush(RGB(60, 60, 60)); // Standard button bg
-    RoundRect(hdc, edit_rc.left, edit_rc.top, edit_rc.right, edit_rc.bottom, 4, 4);
-    FillRect(hdc, &edit_rc, edit_bg);
-    DeleteObject(edit_bg);
-    
-    SetTextColor(hdc, RGB(255, 255, 255));
+    theme_flat_rect(hdc, &edit_rc, CLR_VS_BTN_BG, CLR_VS_BORDER_ELEM);
+    SetTextColor(hdc, CLR_VS_TEXT);
     SelectObject(hdc, theme_font_small());
     DrawTextW(hdc, L"Edit", -1, &edit_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
