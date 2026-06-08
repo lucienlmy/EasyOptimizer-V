@@ -116,15 +116,27 @@ uint32_t jenk_hash(const std::string &value, const std::vector<uint8_t> &lut) {
 }
 
 struct Crypto {
-    Crypto() : ng_blob(read_auxiliary_file(L"ng.dat")), lut(read_auxiliary_file(L"lut.dat")) {}
+    Crypto() {}
+
+    void ensure_loaded() const {
+        if (ng_blob.empty()) {
+            ng_blob = read_auxiliary_file(L"ng.dat");
+            lut = read_auxiliary_file(L"lut.dat");
+        }
+    }
 
     std::vector<uint8_t> decrypt(std::vector<uint8_t> data, uint32_t encryption,
                                  const std::string &archive_name, uint32_t archive_size) const {
         if (encryption == NONE_ENCRYPTION || encryption == OPEN_ENCRYPTION) return data;
         if (encryption == AES_ENCRYPTION) return decrypt_aes(std::move(data));
         if (encryption == NG_ENCRYPTION) {
-            if (ng_blob.size() < NG_KEYS_SIZE + 278528U || lut.size() != 256U)
+            ensure_loaded();
+            if (ng_blob.size() < NG_KEYS_SIZE + 278528U || lut.size() != 256U) {
+                /* If they are corrupt or partially written, clear them to force a retry next time */
+                ng_blob.clear();
+                lut.clear();
                 throw std::runtime_error("NG-encrypted RPF requires ng.dat and lut.dat beside the executable");
+            }
             return decrypt_ng(std::move(data), archive_name, archive_size);
         }
         /* Unknown/custom encryption marker (e.g. some modded RPFs such as the
@@ -245,8 +257,8 @@ struct Crypto {
         return data;
     }
 
-    std::vector<uint8_t> ng_blob;
-    std::vector<uint8_t> lut;
+    mutable std::vector<uint8_t> ng_blob;
+    mutable std::vector<uint8_t> lut;
 };
 
 uint32_t resource_size_from_flags(uint32_t flags) {
