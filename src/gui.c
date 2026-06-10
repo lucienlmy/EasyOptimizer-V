@@ -67,6 +67,9 @@ AppState g_app = {0};
 #define ID_MENU_SPONSOR          1601
 #define ID_MENU_ABOUT            1602
 
+/* One id per UI language (15 contiguous ids, ID_MENU_LANG_BASE + AppLanguage). */
+#define ID_MENU_LANG_BASE        1700
+
 #define IDC_DET_CRITERION 3030
 #define IDC_MIG_CRITERION 3031
 #define IDC_MIG_STRATEGY  3032
@@ -123,6 +126,12 @@ typedef struct {
 
 #define MENU_BAR_HEIGHT    24
 
+/* Posted by the background optimize worker when the batch finishes. */
+#define WM_APP_OPT_DONE (WM_APP + 11)
+/* Non-zero while a background batch is mutating texture data; the content paint
+ * shows a "busy" overlay instead of decoding textures (avoids a data race). */
+static volatile LONG g_batch_running = 0;
+
 /* Texture grid card size is adjustable at runtime (Small / Medium / Native),
  * mirroring the C# "Grid" button. CARD_W/CARD_H read the active size. */
 static int g_grid_index = 1;   /* 0=Small, 1=Medium, 2=Native */
@@ -160,7 +169,6 @@ static void do_migrate_duplicates(void);
 static void do_smart_optimize(void);
 static void paint_content(HWND hwnd, HDC hdc);
 static void paint_sidebar(HWND hwnd, HDC hdc);
-static void paint_header(HWND hwnd, HDC hdc);
 static bool toolbar_button_enabled(int id);
 static void toolbar_command(HWND hwnd, int id);
 static bool hit_test_texture(int mx, int my, int *out_ytd, int *out_tex, int *out_cx, int *out_cy);
@@ -430,8 +438,125 @@ static bool should_import_archive_path(const wchar_t *path) {
     return false;
 }
 
+/* ── Central translation table ─────────────────────────────────────────
+ * Every UI string is keyed by its English text and carries all 15 languages
+ * (order matches AppLanguage: EN, PT, ES, RU, TR, ZH, HI, JA, AR, BN, FR, DE,
+ * ID, KO, IT). trw()/trw8()/trw9() consult this first, so adding a language
+ * here covers the whole app without touching call sites. */
+typedef struct { const wchar_t *en; const wchar_t *t[15]; } I18nEntry;
+
+static const I18nEntry g_i18n[] = {
+ /* Menu bar (ALL-CAPS, VS2012 style) */
+ { L"FILE", { L"FILE", L"ARQUIVO", L"ARCHIVO", L"ФАЙЛ", L"DOSYA", L"文件", L"फ़ाइल", L"ファイル", L"ملف", L"ফাইল", L"FICHIER", L"DATEI", L"BERKAS", L"파일", L"FILE" } },
+ { L"ACTIONS", { L"ACTIONS", L"AÇÕES", L"ACCIONES", L"ДЕЙСТВИЯ", L"İŞLEMLER", L"操作", L"क्रियाएँ", L"アクション", L"إجراءات", L"ক্রিয়া", L"ACTIONS", L"AKTIONEN", L"TINDAKAN", L"작업", L"AZIONI" } },
+ { L"VIEW", { L"VIEW", L"EXIBIR", L"VER", L"ВИД", L"GÖRÜNÜM", L"视图", L"दृश्य", L"表示", L"عرض", L"ভিউ", L"AFFICHAGE", L"ANSICHT", L"TAMPILAN", L"보기", L"VISUALIZZA" } },
+ /* Toolbar short labels */
+ { L"Detect", { L"Detect", L"Detectar", L"Detectar", L"Найти", L"Bul", L"检测", L"खोजें", L"検出", L"كشف", L"খুঁজুন", L"Détecter", L"Erkennen", L"Deteksi", L"감지", L"Rileva" } },
+ { L"Migrate", { L"Migrate", L"Migrar", L"Migrar", L"Перенести", L"Taşı", L"迁移", L"माइग्रेट", L"移行", L"نقل", L"স্থানান্তর", L"Migrer", L"Migrieren", L"Migrasi", L"이동", L"Migra" } },
+ { L"Optimize", { L"Optimize", L"Otimizar", L"Optimizar", L"Оптимизация", L"Optimize", L"优化", L"अनुकूलन", L"最適化", L"تحسين", L"অপ্টিমাইজ", L"Optimiser", L"Optimieren", L"Optimalkan", L"최적화", L"Ottimizza" } },
+ { L"Recomp", { L"Recomp", L"Recompr.", L"Recompr.", L"Сжать", L"Sıkıştır", L"重压", L"पुनःसंपीड़न", L"再圧縮", L"إعادة ضغط", L"পুনঃসংকোচন", L"Recompr.", L"Neukompr.", L"Kompres", L"재압축", L"Ricompr." } },
+ /* Search placeholder + totals */
+ { L"Find Item", { L"Find Item", L"Buscar item", L"Buscar elemento", L"Найти элемент", L"Öğe bul", L"查找项目", L"आइटम खोजें", L"項目を検索", L"بحث عن عنصر", L"আইটেম খুঁজুন", L"Rechercher", L"Element suchen", L"Cari item", L"항목 찾기", L"Trova elemento" } },
+ { L"Totals:", { L"Totals:", L"Totais:", L"Totales:", L"Итого:", L"Toplam:", L"合计：", L"कुल:", L"合計：", L"الإجمالي:", L"মোট:", L"Totaux :", L"Gesamt:", L"Total:", L"합계:", L"Totali:" } },
+ /* Dropdown menu items */
+ { L"Add File...", { L"Add File...", L"Adicionar arquivo...", L"Añadir archivo...", L"Добавить файл...", L"Dosya Ekle...", L"添加文件...", L"फ़ाइल जोड़ें...", L"ファイルを追加...", L"إضافة ملف...", L"ফাইল যোগ করুন...", L"Ajouter un fichier...", L"Datei hinzufügen...", L"Tambah Berkas...", L"파일 추가...", L"Aggiungi file..." } },
+ { L"Add Folder...", { L"Add Folder...", L"Adicionar pasta...", L"Añadir carpeta...", L"Добавить папку...", L"Klasör Ekle...", L"添加文件夹...", L"फ़ोल्डर जोड़ें...", L"フォルダーを追加...", L"إضافة مجلد...", L"ফোল্ডার যোগ করুন...", L"Ajouter un dossier...", L"Ordner hinzufügen...", L"Tambah Folder...", L"폴더 추가...", L"Aggiungi cartella..." } },
+ { L"Exit", { L"Exit", L"Sair", L"Salir", L"Выход", L"Çıkış", L"退出", L"बाहर निकलें", L"終了", L"خروج", L"প্রস্থান", L"Quitter", L"Beenden", L"Keluar", L"종료", L"Esci" } },
+ { L"Migrate Duplicates", { L"Migrate Duplicates", L"Migrar duplicadas", L"Migrar duplicados", L"Перенести дубликаты", L"Yinelenenleri Taşı", L"迁移重复项", L"डुप्लिकेट माइग्रेट करें", L"重複を移行", L"نقل التكرارات", L"ডুপ্লিকেট স্থানান্তর", L"Migrer les doublons", L"Duplikate migrieren", L"Migrasikan Duplikat", L"중복 이동", L"Migra duplicati" } },
+ { L"Sort Mode", { L"Sort Mode", L"Modo de ordenação", L"Modo de orden", L"Сортировка", L"Sıralama Modu", L"排序方式", L"क्रमबद्ध मोड", L"並べ替え", L"وضع الفرز", L"সাজানোর মোড", L"Mode de tri", L"Sortiermodus", L"Mode Urutkan", L"정렬 모드", L"Modo ordinamento" } },
+ { L"Sort by Name", { L"Sort by Name", L"Ordenar por nome", L"Ordenar por nombre", L"По имени", L"Ada Göre Sırala", L"按名称排序", L"नाम से क्रमबद्ध", L"名前順", L"فرز حسب الاسم", L"নাম অনুসারে", L"Trier par nom", L"Nach Name sortieren", L"Urutkan menurut Nama", L"이름순 정렬", L"Ordina per nome" } },
+ { L"Sort by Type", { L"Sort by Type", L"Ordenar por tipo", L"Ordenar por tipo", L"По типу", L"Türe Göre Sırala", L"按类型排序", L"प्रकार से क्रमबद्ध", L"種類順", L"فرز حسب النوع", L"ধরন অনুসারে", L"Trier par type", L"Nach Typ sortieren", L"Urutkan menurut Tipe", L"유형순 정렬", L"Ordina per tipo" } },
+ { L"Sort by Size", { L"Sort by Size", L"Ordenar por tamanho", L"Ordenar por tamaño", L"По размеру", L"Boyuta Göre Sırala", L"按大小排序", L"आकार से क्रमबद्ध", L"サイズ順", L"فرز حسب الحجم", L"আকার অনুসারে", L"Trier par taille", L"Nach Größe sortieren", L"Urutkan menurut Ukuran", L"크기순 정렬", L"Ordina per dimensione" } },
+ { L"Sort by Textures", { L"Sort by Textures", L"Ordenar por texturas", L"Ordenar por texturas", L"По текстурам", L"Dokulara Göre Sırala", L"按纹理数排序", L"टेक्सचर से क्रमबद्ध", L"テクスチャ数順", L"فرز حسب القوام", L"টেক্সচার অনুসারে", L"Trier par textures", L"Nach Texturen sortieren", L"Urutkan menurut Tekstur", L"텍스처순 정렬", L"Ordina per texture" } },
+ { L"Sort by Resolution", { L"Sort by Resolution", L"Ordenar por resolução", L"Ordenar por resolución", L"По разрешению", L"Çözünürlüğe Göre Sırala", L"按分辨率排序", L"रिज़ॉल्यूशन से क्रमबद्ध", L"解像度順", L"فرز حسب الدقة", L"রেজোলিউশন অনুসারে", L"Trier par résolution", L"Nach Auflösung sortieren", L"Urutkan menurut Resolusi", L"해상도순 정렬", L"Ordina per risoluzione" } },
+ { L"Sort by Mipmaps", { L"Sort by Mipmaps", L"Ordenar por mipmaps", L"Ordenar por mipmaps", L"По мип-уровням", L"Mipmap'lere Göre Sırala", L"按 Mipmap 排序", L"मिपमैप से क्रमबद्ध", L"ミップマップ順", L"فرز حسب Mipmaps", L"মিপম্যাপ অনুসারে", L"Trier par mipmaps", L"Nach Mipmaps sortieren", L"Urutkan menurut Mipmap", L"밉맵순 정렬", L"Ordina per mipmap" } },
+ { L"Sort by Compression", { L"Sort by Compression", L"Ordenar por compressão", L"Ordenar por compresión", L"По сжатию", L"Sıkıştırmaya Göre Sırala", L"按压缩排序", L"संपीड़न से क्रमबद्ध", L"圧縮形式順", L"فرز حسب الضغط", L"সংকোচন অনুসারে", L"Trier par compression", L"Nach Komprimierung sortieren", L"Urutkan menurut Kompresi", L"압축순 정렬", L"Ordina per compressione" } },
+ { L"Sort by Modified", { L"Sort by Modified", L"Ordenar por modificados", L"Ordenar por modificados", L"По изменению", L"Değiştirilmeye Göre Sırala", L"按修改排序", L"संशोधित से क्रमबद्ध", L"更新順", L"فرز حسب التعديل", L"পরিবর্তিত অনুসারে", L"Trier par modification", L"Nach Änderung sortieren", L"Urutkan menurut Diubah", L"수정순 정렬", L"Ordina per modifica" } },
+ { L"Grid Size", { L"Grid Size", L"Tamanho da grade", L"Tamaño de cuadrícula", L"Размер сетки", L"Izgara Boyutu", L"网格大小", L"ग्रिड आकार", L"グリッドサイズ", L"حجم الشبكة", L"গ্রিড আকার", L"Taille de grille", L"Rastergröße", L"Ukuran Kisi", L"격자 크기", L"Dimensione griglia" } },
+ { L"Small Cards", { L"Small Cards", L"Cartões pequenos", L"Tarjetas pequeñas", L"Маленькие карточки", L"Küçük Kartlar", L"小卡片", L"छोटे कार्ड", L"小カード", L"بطاقات صغيرة", L"ছোট কার্ড", L"Petites cartes", L"Kleine Karten", L"Kartu Kecil", L"작은 카드", L"Schede piccole" } },
+ { L"Medium Cards", { L"Medium Cards", L"Cartões médios", L"Tarjetas medianas", L"Средние карточки", L"Orta Kartlar", L"中卡片", L"मध्यम कार्ड", L"中カード", L"بطاقات متوسطة", L"মাঝারি কার্ড", L"Cartes moyennes", L"Mittlere Karten", L"Kartu Sedang", L"중간 카드", L"Schede medie" } },
+ { L"Native / Original", { L"Native / Original", L"Nativo / Original", L"Nativo / Original", L"Оригинал", L"Yerel / Orijinal", L"原生 / 原始", L"मूल / नेटिव", L"ネイティブ / 原寸", L"أصلي / طبيعي", L"নেটিভ / মূল", L"Natif / Original", L"Nativ / Original", L"Asli / Original", L"원본 / 네이티브", L"Nativo / Originale" } },
+ { L"Encoder", { L"Encoder", L"Codificador", L"Codificador", L"Кодировщик", L"Kodlayıcı", L"编码器", L"एन्कोडर", L"エンコーダー", L"المُرمِّز", L"এনকোডার", L"Encodeur", L"Encoder", L"Encoder", L"인코더", L"Codificatore" } },
+ { L"Use CPU Encoding", { L"Use CPU Encoding", L"Usar codificação por CPU", L"Usar codificación por CPU", L"Кодирование на CPU", L"CPU Kodlaması Kullan", L"使用 CPU 编码", L"CPU एन्कोडिंग उपयोग करें", L"CPU エンコードを使用", L"استخدام ترميز CPU", L"CPU এনকোডিং ব্যবহার", L"Utiliser l'encodage CPU", L"CPU-Kodierung verwenden", L"Gunakan Encoding CPU", L"CPU 인코딩 사용", L"Usa codifica CPU" } },
+ { L"Use GPU Encoding", { L"Use GPU Encoding", L"Usar codificação por GPU", L"Usar codificación por GPU", L"Кодирование на GPU", L"GPU Kodlaması Kullan", L"使用 GPU 编码", L"GPU एन्कोडिंग उपयोग करें", L"GPU エンコードを使用", L"استخدام ترميز GPU", L"GPU এনকোডিং ব্যবহার", L"Utiliser l'encodage GPU", L"GPU-Kodierung verwenden", L"Gunakan Encoding GPU", L"GPU 인코딩 사용", L"Usa codifica GPU" } },
+ { L"Language", { L"Language", L"Idioma", L"Idioma", L"Язык", L"Dil", L"语言", L"भाषा", L"言語", L"اللغة", L"ভাষা", L"Langue", L"Sprache", L"Bahasa", L"언어", L"Lingua" } },
+ { L"Add File", { L"Add File", L"Adicionar arquivo", L"Añadir archivo", L"Добавить файл", L"Dosya Ekle", L"添加文件", L"फ़ाइल जोड़ें", L"ファイルを追加", L"إضافة ملف", L"ফাইল যোগ করুন", L"Ajouter un fichier", L"Datei hinzufügen", L"Tambah Berkas", L"파일 추가", L"Aggiungi file" } },
+ { L"Add Folder", { L"Add Folder", L"Adicionar pasta", L"Añadir carpeta", L"Добавить папку", L"Klasör Ekle", L"添加文件夹", L"फ़ोल्डर जोड़ें", L"フォルダーを追加", L"إضافة مجلد", L"ফোল্ডার যোগ করুন", L"Ajouter un dossier", L"Ordner hinzufügen", L"Tambah Folder", L"폴더 추가", L"Aggiungi cartella" } },
+ { L"Save All", { L"Save All", L"Salvar tudo", L"Guardar todo", L"Сохранить все", L"Tümünü Kaydet", L"全部保存", L"सभी सहेजें", L"すべて保存", L"حفظ الكل", L"সব সংরক্ষণ করুন", L"Tout enregistrer", L"Alles speichern", L"Simpan Semua", L"모두 저장", L"Salva tutto" } },
+ { L"Clear All", { L"Clear All", L"Limpar tudo", L"Limpiar todo", L"Очистить все", L"Tümünü Temizle", L"全部清除", L"सभी साफ़ करें", L"すべてクリア", L"مسح الكل", L"সব মুছুন", L"Tout effacer", L"Alles löschen", L"Bersihkan Semua", L"모두 지우기", L"Cancella tutto" } },
+ { L"Detect Duplicates", { L"Detect Duplicates", L"Detectar duplicadas", L"Detectar duplicados", L"Найти дубликаты", L"Yinelenenleri Bul", L"检测重复项", L"डुप्लिकेट खोजें", L"重複を検出", L"كشف التكرارات", L"ডুপ্লিকেট খুঁজুন", L"Détecter les doublons", L"Duplikate erkennen", L"Deteksi Duplikat", L"중복 감지", L"Rileva duplicati" } },
+ { L"Migrate Dups", { L"Migrate Dups", L"Migrar duplicadas", L"Migrar duplicados", L"Перенести дубликаты", L"Yinelenenleri Taşı", L"迁移重复项", L"डुप्लिकेट माइग्रेट करें", L"重複を移行", L"نقل التكرارات", L"ডুপ্লিকেট স্থানান্তর", L"Migrer les doublons", L"Duplikate migrieren", L"Migrasikan Duplikat", L"중복 이동", L"Migra duplicati" } },
+ { L"Smart Optimize", { L"Smart Optimize", L"Otimização inteligente", L"Optimización inteligente", L"Умная оптимизация", L"Akıllı Optimize", L"智能优化", L"स्मार्ट अनुकूलन", L"スマート最適化", L"تحسين ذكي", L"স্মার্ট অপ্টিমাইজ", L"Optimisation intelligente", L"Intelligent optimieren", L"Optimasi Cerdas", L"스마트 최적화", L"Ottimizzazione intelligente" } },
+ { L"Fast Recompress", { L"Fast Recompress", L"Recompressão rápida", L"Recompresión rápida", L"Быстрое сжатие", L"Hızlı Yeniden Sıkıştır", L"快速重新压缩", L"तेज़ पुनःसंपीड़न", L"高速再圧縮", L"إعادة ضغط سريعة", L"দ্রুত পুনঃসংকোচন", L"Recompression rapide", L"Schnell neu komprimieren", L"Kompres Ulang Cepat", L"빠른 재압축", L"Ricompressione rapida" } },
+ { L"Resize", { L"Resize", L"Redimensionar", L"Redimensionar", L"Изменить размер", L"Yeniden Boyutlandır", L"调整大小", L"आकार बदलें", L"サイズ変更", L"تغيير الحجم", L"আকার পরিবর্তন", L"Redimensionner", L"Größe ändern", L"Ubah Ukuran", L"크기 조정", L"Ridimensiona" } },
+ { L"Convert Format", { L"Convert Format", L"Converter formato", L"Convertir formato", L"Сменить формат", L"Biçimi Dönüştür", L"转换格式", L"प्रारूप बदलें", L"形式を変換", L"تحويل الصيغة", L"ফরম্যাট রূপান্তর", L"Convertir le format", L"Format umwandeln", L"Konversi Format", L"형식 변환", L"Converti formato" } },
+ { L"Custom...", { L"Custom...", L"Personalizado...", L"Personalizado...", L"Другой...", L"Özel...", L"自定义...", L"कस्टम...", L"カスタム...", L"مخصص...", L"কাস্টম...", L"Personnalisé...", L"Benutzerdefiniert...", L"Khusus...", L"사용자 지정...", L"Personalizzato..." } },
+ { L"Export as DDS...", { L"Export as DDS...", L"Exportar como DDS...", L"Exportar como DDS...", L"Экспорт в DDS...", L"DDS Olarak Dışa Aktar...", L"导出为 DDS...", L"DDS के रूप में निर्यात...", L"DDS としてエクスポート...", L"تصدير كـ DDS...", L"DDS হিসেবে রপ্তানি...", L"Exporter en DDS...", L"Als DDS exportieren...", L"Ekspor sebagai DDS...", L"DDS로 내보내기...", L"Esporta come DDS..." } },
+ { L"Export all textures (this file) as DDS...", { L"Export all textures (this file) as DDS...", L"Exportar todas as texturas (este arquivo) como DDS...", L"Exportar todas las texturas (este archivo) como DDS...", L"Экспортировать все текстуры (этот файл) в DDS...", L"Tüm dokuları (bu dosya) DDS olarak dışa aktar...", L"将所有纹理（此文件）导出为 DDS...", L"सभी टेक्सचर (यह फ़ाइल) DDS के रूप में निर्यात...", L"すべてのテクスチャ（このファイル）を DDS でエクスポート...", L"تصدير كل القوام (هذا الملف) كـ DDS...", L"সব টেক্সচার (এই ফাইল) DDS হিসেবে রপ্তানি...", L"Exporter toutes les textures (ce fichier) en DDS...", L"Alle Texturen (diese Datei) als DDS exportieren...", L"Ekspor semua tekstur (file ini) sebagai DDS...", L"모든 텍스처(이 파일)를 DDS로 내보내기...", L"Esporta tutte le texture (questo file) come DDS..." } },
+ { L"Remove Texture", { L"Remove Texture", L"Remover textura", L"Eliminar textura", L"Удалить текстуру", L"Dokuyu Kaldır", L"移除纹理", L"टेक्सचर हटाएं", L"テクスチャを削除", L"إزالة القوام", L"টেক্সচার সরান", L"Supprimer la texture", L"Textur entfernen", L"Hapus Tekstur", L"텍스처 제거", L"Rimuovi texture" } },
+ { L"Unload changes (revert to original)", { L"Unload changes (revert to original)", L"Descartar alterações (voltar ao original)", L"Descartar cambios (volver al original)", L"Откатить изменения (к оригиналу)", L"Değişiklikleri geri al (orijinale dön)", L"撤销更改（还原为原始）", L"परिवर्तन हटाएं (मूल पर लौटें)", L"変更を取り消す（元に戻す）", L"إلغاء التغييرات (العودة للأصل)", L"পরিবর্তন বাতিল (মূলে ফিরুন)", L"Annuler les modifications (revenir à l'original)", L"Änderungen verwerfen (Original wiederherstellen)", L"Buang perubahan (kembali ke asli)", L"변경 취소(원본으로 되돌리기)", L"Annulla modifiche (ripristina originale)" } },
+ { L"Unload (remove from workspace)", { L"Unload (remove from workspace)", L"Descarregar (remover do workspace)", L"Descargar (quitar del espacio de trabajo)", L"Выгрузить (убрать из рабочей области)", L"Kaldır (çalışma alanından çıkar)", L"卸载（从工作区移除）", L"अनलोड करें (वर्कस्पेस से हटाएं)", L"アンロード（ワークスペースから削除）", L"إلغاء التحميل (إزالة من مساحة العمل)", L"আনলোড (ওয়ার্কস্পেস থেকে সরান)", L"Décharger (retirer de l'espace de travail)", L"Entladen (aus Arbeitsbereich entfernen)", L"Bongkar (hapus dari ruang kerja)", L"언로드(작업 영역에서 제거)", L"Scarica (rimuovi dall'area di lavoro)" } },
+ { L"Unload RPF (remove from workspace)", { L"Unload RPF (remove from workspace)", L"Descarregar RPF (remover do workspace)", L"Descargar RPF (quitar del espacio de trabajo)", L"Выгрузить RPF (убрать из рабочей области)", L"RPF'yi kaldır (çalışma alanından çıkar)", L"卸载 RPF（从工作区移除）", L"RPF अनलोड करें (वर्कस्पेस से हटाएं)", L"RPF をアンロード（ワークスペースから削除）", L"إلغاء تحميل RPF (إزالة من مساحة العمل)", L"RPF আনলোড (ওয়ার্কস্পেস থেকে সরান)", L"Décharger le RPF (retirer de l'espace de travail)", L"RPF entladen (aus Arbeitsbereich entfernen)", L"Bongkar RPF (hapus dari ruang kerja)", L"RPF 언로드(작업 영역에서 제거)", L"Scarica RPF (rimuovi dall'area di lavoro)" } },
+ { L"Drop texture files here or click 'Add File'", { L"Drop texture files here or click 'Add File'", L"Arraste arquivos de textura aqui ou clique em 'Adicionar arquivo'", L"Arrastre archivos de textura aquí o haga clic en 'Añadir archivo'", L"Перетащите файлы текстур сюда или нажмите 'Добавить файл'", L"Doku dosyalarını buraya bırakın veya 'Dosya Ekle'ye tıklayın", L"将纹理文件拖到此处，或点击“添加文件”", L"टेक्सचर फ़ाइलें यहाँ छोड़ें या 'फ़ाइल जोड़ें' पर क्लिक करें", L"テクスチャファイルをここにドロップするか「ファイルを追加」をクリック", L"أسقط ملفات القوام هنا أو انقر 'إضافة ملف'", L"টেক্সচার ফাইল এখানে ছাড়ুন বা 'ফাইল যোগ করুন' ক্লিক করুন", L"Déposez les fichiers de texture ici ou cliquez sur « Ajouter un fichier »", L"Texturdateien hierher ziehen oder auf „Datei hinzufügen“ klicken", L"Letakkan file tekstur di sini atau klik 'Tambah Berkas'", L"여기에 텍스처 파일을 끌어다 놓거나 '파일 추가'를 클릭하세요", L"Trascina qui i file di texture o fai clic su 'Aggiungi file'" } },
+ { L"Optimizing… please wait", { L"Optimizing… please wait", L"Otimizando… aguarde", L"Optimizando… espere", L"Оптимизация… подождите", L"Optimize ediliyor… lütfen bekleyin", L"正在优化…请稍候", L"अनुकूलन हो रहा है… प्रतीक्षा करें", L"最適化中…お待ちください", L"جارٍ التحسين… يرجى الانتظار", L"অপ্টিমাইজ হচ্ছে… অপেক্ষা করুন", L"Optimisation… veuillez patienter", L"Optimierung… bitte warten", L"Mengoptimalkan… harap tunggu", L"최적화 중… 잠시 기다려 주세요", L"Ottimizzazione… attendere" } },
+ { L"Are you sure you want to remove this texture?", { L"Are you sure you want to remove this texture?", L"Tem certeza que deseja remover esta textura?", L"¿Seguro que desea eliminar esta textura?", L"Удалить эту текстуру?", L"Bu dokuyu kaldırmak istediğinizden emin misiniz?", L"确定要移除此纹理吗？", L"क्या आप वाकई इस टेक्सचर को हटाना चाहते हैं?", L"このテクスチャを削除してもよろしいですか？", L"هل أنت متأكد من إزالة هذا القوام؟", L"আপনি কি নিশ্চিতভাবে এই টেক্সচার সরাতে চান?", L"Voulez-vous vraiment supprimer cette texture ?", L"Möchten Sie diese Textur wirklich entfernen?", L"Yakin ingin menghapus tekstur ini?", L"이 텍스처를 제거하시겠습니까?", L"Rimuovere questa texture?" } },
+ { L"No duplicate textures were found.", { L"No duplicate textures were found.", L"Nenhuma textura duplicada encontrada.", L"No se encontraron texturas duplicadas.", L"Дубликаты текстур не найдены.", L"Yinelenen doku bulunamadı.", L"未找到重复纹理。", L"कोई डुप्लिकेट टेक्सचर नहीं मिला।", L"重複するテクスチャは見つかりませんでした。", L"لم يتم العثور على قوام مكرر.", L"কোনো ডুপ্লিকেট টেক্সচার পাওয়া যায়নি।", L"Aucune texture en double trouvée.", L"Keine doppelten Texturen gefunden.", L"Tidak ada tekstur duplikat ditemukan.", L"중복 텍스처를 찾을 수 없습니다.", L"Nessuna texture duplicata trovata." } },
+ { L"Choose how to save the modified files", { L"Choose how to save the modified files", L"Escolha como salvar os arquivos modificados", L"Elija cómo guardar los archivos modificados", L"Выберите способ сохранения измененных файлов", L"Değiştirilen dosyaların nasıl kaydedileceğini seçin", L"选择如何保存已修改的文件", L"संशोधित फ़ाइलों को सहेजने का तरीका चुनें", L"変更したファイルの保存方法を選択", L"اختر طريقة حفظ الملفات المعدلة", L"পরিবর্তিত ফাইল কীভাবে সংরক্ষণ করবেন বেছে নিন", L"Choisissez comment enregistrer les fichiers modifiés", L"Wählen Sie, wie die geänderten Dateien gespeichert werden", L"Pilih cara menyimpan file yang diubah", L"수정된 파일을 저장하는 방법을 선택하세요", L"Scegli come salvare i file modificati" } },
+ { L"Replace original YTD/WTD files", { L"Replace original YTD/WTD files", L"Substituir arquivos YTD/WTD originais", L"Reemplazar archivos YTD/WTD originales", L"Заменить исходные файлы YTD/WTD", L"Orijinal YTD/WTD dosyalarını değiştir", L"替换原始 YTD/WTD 文件", L"मूल YTD/WTD फ़ाइलें बदलें", L"元の YTD/WTD ファイルを置き換える", L"استبدال ملفات YTD/WTD الأصلية", L"মূল YTD/WTD ফাইল প্রতিস্থাপন", L"Remplacer les fichiers YTD/WTD d'origine", L"Original-YTD/WTD-Dateien ersetzen", L"Ganti file YTD/WTD asli", L"원본 YTD/WTD 파일 교체", L"Sostituisci i file YTD/WTD originali" } },
+ { L"Save copies to another folder", { L"Save copies to another folder", L"Salvar cópias em outra pasta", L"Guardar copias en otra carpeta", L"Сохранить копии в другую папку", L"Kopyaları başka bir klasöre kaydet", L"将副本保存到其他文件夹", L"प्रतियाँ दूसरे फ़ोल्डर में सहेजें", L"別のフォルダーにコピーを保存", L"حفظ النسخ في مجلد آخر", L"অন্য ফোল্ডারে কপি সংরক্ষণ", L"Enregistrer des copies dans un autre dossier", L"Kopien in einen anderen Ordner speichern", L"Simpan salinan ke folder lain", L"다른 폴더에 복사본 저장", L"Salva copie in un'altra cartella" } },
+ { L"Save only to versioned project cache", { L"Save only to versioned project cache", L"Salvar somente no cache versionado do projeto", L"Guardar solo en la caché versionada del proyecto", L"Сохранить только в версионный кэш проекта", L"Yalnızca sürümlü proje önbelleğine kaydet", L"仅保存到版本化的项目缓存", L"केवल वर्शन प्रोजेक्ट कैश में सहेजें", L"バージョン管理されたプロジェクトキャッシュにのみ保存", L"الحفظ فقط في ذاكرة المشروع المؤقتة المُصدَّرة", L"শুধু সংস্করণযুক্ত প্রকল্প ক্যাশে সংরক্ষণ", L"Enregistrer uniquement dans le cache de projet versionné", L"Nur im versionierten Projekt-Cache speichern", L"Simpan hanya ke cache proyek berversi", L"버전 관리된 프로젝트 캐시에만 저장", L"Salva solo nella cache di progetto con versione" } },
+ { L"Select folder for DDS export", { L"Select folder for DDS export", L"Selecione a pasta para exportar DDS", L"Seleccione la carpeta para exportar DDS", L"Выберите папку для экспорта DDS", L"DDS dışa aktarımı için klasör seçin", L"选择 DDS 导出文件夹", L"DDS निर्यात के लिए फ़ोल्डर चुनें", L"DDS エクスポート先フォルダーを選択", L"اختر مجلد تصدير DDS", L"DDS রপ্তানির জন্য ফোল্ডার নির্বাচন", L"Sélectionnez le dossier d'export DDS", L"Ordner für DDS-Export wählen", L"Pilih folder untuk ekspor DDS", L"DDS 내보내기 폴더 선택", L"Seleziona la cartella per l'esportazione DDS" } },
+ { L"Select folder to scan for texture files", { L"Select folder to scan for texture files", L"Selecione a pasta para procurar arquivos de textura", L"Seleccione la carpeta para buscar archivos de textura", L"Выберите папку для поиска файлов текстур", L"Doku dosyalarını taramak için klasör seçin", L"选择要扫描纹理文件的文件夹", L"टेक्सचर फ़ाइलों के लिए स्कैन करने हेतु फ़ोल्डर चुनें", L"テクスチャファイルを検索するフォルダーを選択", L"اختر مجلدًا للبحث عن ملفات القوام", L"টেক্সচার ফাইল স্ক্যান করতে ফোল্ডার নির্বাচন", L"Sélectionnez le dossier à analyser pour les textures", L"Ordner zum Suchen nach Texturdateien wählen", L"Pilih folder untuk memindai file tekstur", L"텍스처 파일을 검색할 폴더 선택", L"Seleziona la cartella in cui cercare le texture" } },
+ { L"Select output folder", { L"Select output folder", L"Selecione a pasta de saída", L"Seleccione la carpeta de salida", L"Выберите папку вывода", L"Çıktı klasörünü seçin", L"选择输出文件夹", L"आउटपुट फ़ोल्डर चुनें", L"出力フォルダーを選択", L"اختر مجلد الإخراج", L"আউটপুট ফোল্ডার নির্বাচন", L"Sélectionnez le dossier de sortie", L"Ausgabeordner wählen", L"Pilih folder keluaran", L"출력 폴더 선택", L"Seleziona la cartella di output" } },
+ { L"Select texture files", { L"Select texture files", L"Selecione arquivos de textura", L"Seleccione archivos de textura", L"Выберите файлы текстур", L"Doku dosyalarını seçin", L"选择纹理文件", L"टेक्सचर फ़ाइलें चुनें", L"テクスチャファイルを選択", L"اختر ملفات القوام", L"টেক্সচার ফাইল নির্বাচন", L"Sélectionnez les fichiers de texture", L"Texturdateien auswählen", L"Pilih file tekstur", L"텍스처 파일 선택", L"Seleziona i file di texture" } },
+ { L"Project cache saved", { L"Project cache saved", L"Cache do projeto salvo", L"Caché del proyecto guardada", L"Кэш проекта сохранен", L"Proje önbelleği kaydedildi", L"项目缓存已保存", L"प्रोजेक्ट कैश सहेजा गया", L"プロジェクトキャッシュを保存しました", L"تم حفظ ذاكرة المشروع المؤقتة", L"প্রকল্প ক্যাশ সংরক্ষিত হয়েছে", L"Cache de projet enregistré", L"Projekt-Cache gespeichert", L"Cache proyek disimpan", L"프로젝트 캐시가 저장됨", L"Cache di progetto salvata" } },
+ { L"Keys generated successfully. Encrypted vanilla RPF archives can now be opened.", { L"Keys generated successfully. Encrypted vanilla RPF archives can now be opened.", L"Chaves geradas com sucesso. RPFs vanilla criptografados agora podem ser abertos.", L"Claves generadas correctamente. Ahora se pueden abrir los RPF vanilla cifrados.", L"Ключи успешно созданы. Зашифрованные ванильные RPF теперь можно открыть.", L"Anahtarlar oluşturuldu. Şifreli orijinal RPF arşivleri artık açılabilir.", L"密钥生成成功。现在可以打开加密的原版 RPF 档案。", L"कुंजियाँ सफलतापूर्वक बनीं। अब एन्क्रिप्टेड वैनिला RPF खोले जा सकते हैं।", L"キーを生成しました。暗号化されたバニラ RPF を開けるようになりました。", L"تم إنشاء المفاتيح بنجاح. يمكن الآن فتح أرشيفات RPF الأصلية المشفرة.", L"কী সফলভাবে তৈরি হয়েছে। এনক্রিপ্ট করা ভ্যানিলা RPF এখন খোলা যাবে।", L"Clés générées avec succès. Les archives RPF vanilla chiffrées peuvent maintenant être ouvertes.", L"Schlüssel erfolgreich erstellt. Verschlüsselte Vanilla-RPF-Archive können nun geöffnet werden.", L"Kunci berhasil dibuat. Arsip RPF vanilla terenkripsi kini dapat dibuka.", L"키가 생성되었습니다. 이제 암호화된 바닐라 RPF를 열 수 있습니다.", L"Chiavi generate con successo. Gli archivi RPF vanilla cifrati possono ora essere aperti." } },
+ { L"Apply this migration?\n\nDuplicate textures will be removed from their original YTDs and the consolidated files committed.", { L"Apply this migration?\n\nDuplicate textures will be removed from their original YTDs and the consolidated files committed.", L"Aplicar esta migração?\n\nTexturas duplicadas serão removidas dos YTDs originais e os arquivos consolidados serão confirmados.", L"¿Aplicar esta migración?\n\nLas texturas duplicadas se eliminarán de sus YTD originales y se confirmarán los archivos consolidados.", L"Применить эту миграцию?\n\nДубликаты текстур будут удалены из исходных YTD, а консолидированные файлы сохранены.", L"Bu taşıma uygulansın mı?\n\nYinelenen dokular orijinal YTD'lerden kaldırılacak ve birleştirilen dosyalar işlenecek.", L"应用此迁移？\n\n重复纹理将从原始 YTD 中移除，并提交合并后的文件。", L"यह माइग्रेशन लागू करें?\n\nडुप्लिकेट टेक्सचर मूल YTD से हटा दिए जाएंगे और समेकित फ़ाइलें सहेजी जाएंगी।", L"この移行を適用しますか？\n\n重複テクスチャは元の YTD から削除され、統合ファイルが確定されます。", L"تطبيق هذا الترحيل؟\n\nسيتم إزالة القوام المكرر من ملفات YTD الأصلية وحفظ الملفات المدمجة.", L"এই মাইগ্রেশন প্রয়োগ করবেন?\n\nডুপ্লিকেট টেক্সচার মূল YTD থেকে সরানো হবে এবং একত্রিত ফাইল সংরক্ষিত হবে।", L"Appliquer cette migration ?\n\nLes textures en double seront retirées de leurs YTD d'origine et les fichiers consolidés validés.", L"Diese Migration anwenden?\n\nDoppelte Texturen werden aus ihren ursprünglichen YTDs entfernt und die konsolidierten Dateien übernommen.", L"Terapkan migrasi ini?\n\nTekstur duplikat akan dihapus dari YTD aslinya dan file gabungan disimpan.", L"이 마이그레이션을 적용할까요?\n\n중복 텍스처가 원본 YTD에서 제거되고 통합 파일이 커밋됩니다.", L"Applicare questa migrazione?\n\nLe texture duplicate verranno rimosse dai YTD originali e i file consolidati confermati." } },
+ { L"This will scan your GTA5.exe and generate the NG decryption keys "
+   L"(ng.dat / lut.dat) needed to read encrypted vanilla RPF archives.\n\n"
+   L"No key data is distributed — keys are derived from your own game copy.\n"
+   L"The scan can take up to a minute and the window may appear busy.\n\nContinue?",
+   { L"This will scan your GTA5.exe and generate the NG decryption keys (ng.dat / lut.dat) needed to read encrypted vanilla RPF archives.\n\nNo key data is distributed — keys are derived from your own game copy.\nThe scan can take up to a minute and the window may appear busy.\n\nContinue?",
+     L"Isto vai escanear seu GTA5.exe e gerar as chaves NG (ng.dat / lut.dat) necessárias para ler RPFs vanilla criptografados.\n\nNenhuma chave é distribuída — elas são derivadas da sua própria cópia do jogo.\nO escaneamento pode levar até um minuto e a janela pode parecer travada.\n\nContinuar?",
+     L"Esto escaneará tu GTA5.exe y generará las claves NG (ng.dat / lut.dat) necesarias para leer archivos RPF vanilla cifrados.\n\nNo se distribuye ninguna clave — se derivan de tu propia copia del juego.\nEl escaneo puede tardar hasta un minuto y la ventana puede parecer ocupada.\n\n¿Continuar?",
+     L"Будет просканирован ваш GTA5.exe и созданы ключи NG (ng.dat / lut.dat) для чтения зашифрованных ванильных RPF.\n\nКлючи не распространяются — они вычисляются из вашей копии игры.\nСканирование может занять до минуты, окно может выглядеть зависшим.\n\nПродолжить?",
+     L"Bu, GTA5.exe dosyanızı tarayıp şifreli orijinal RPF arşivlerini okumak için gereken NG anahtarlarını (ng.dat / lut.dat) oluşturacak.\n\nHiçbir anahtar dağıtılmaz — kendi oyun kopyanızdan türetilir.\nTarama bir dakika sürebilir ve pencere meşgul görünebilir.\n\nDevam edilsin mi?",
+     L"这将扫描你的 GTA5.exe 并生成读取加密原版 RPF 档案所需的 NG 密钥（ng.dat / lut.dat）。\n\n不分发任何密钥——它们由你自己的游戏副本派生。\n扫描可能需要一分钟，窗口可能显示为忙碌。\n\n是否继续？",
+     L"यह आपके GTA5.exe को स्कैन करेगा और एन्क्रिप्टेड वैनिला RPF पढ़ने हेतु आवश्यक NG कुंजियाँ (ng.dat / lut.dat) बनाएगा।\n\nकोई कुंजी वितरित नहीं की जाती — वे आपकी अपनी गेम कॉपी से प्राप्त होती हैं।\nस्कैन में एक मिनट तक लग सकता है और विंडो व्यस्त दिख सकती है।\n\nजारी रखें?",
+     L"GTA5.exe をスキャンし、暗号化されたバニラ RPF を読むために必要な NG キー（ng.dat / lut.dat）を生成します。\n\nキーデータは配布されません — お使いのゲームから導出されます。\nスキャンには最大1分かかり、ウィンドウが応答なしに見えることがあります。\n\n続行しますか？",
+     L"سيتم فحص ملف GTA5.exe لديك وإنشاء مفاتيح NG (ng.dat / lut.dat) اللازمة لقراءة أرشيفات RPF الأصلية المشفرة.\n\nلا يتم توزيع أي مفاتيح — تُشتق من نسختك من اللعبة.\nقد يستغرق الفحص دقيقة وقد تبدو النافذة مشغولة.\n\nهل تريد المتابعة؟",
+     L"এটি আপনার GTA5.exe স্ক্যান করে এনক্রিপ্ট করা ভ্যানিলা RPF পড়তে প্রয়োজনীয় NG কী (ng.dat / lut.dat) তৈরি করবে।\n\nকোনো কী বিতরণ করা হয় না — সেগুলো আপনার নিজের গেম কপি থেকে তৈরি হয়।\nস্ক্যানে এক মিনিট লাগতে পারে এবং উইন্ডো ব্যস্ত দেখাতে পারে।\n\nচালিয়ে যাবেন?",
+     L"Ceci va analyser votre GTA5.exe et générer les clés NG (ng.dat / lut.dat) nécessaires pour lire les archives RPF vanilla chiffrées.\n\nAucune clé n'est distribuée — elles sont dérivées de votre propre copie du jeu.\nL'analyse peut prendre jusqu'à une minute et la fenêtre peut sembler occupée.\n\nContinuer ?",
+     L"Dies scannt Ihre GTA5.exe und erzeugt die NG-Schlüssel (ng.dat / lut.dat), die zum Lesen verschlüsselter Vanilla-RPF-Archive nötig sind.\n\nEs werden keine Schlüssel verteilt — sie werden aus Ihrer eigenen Spielkopie abgeleitet.\nDer Scan kann bis zu einer Minute dauern und das Fenster kann beschäftigt wirken.\n\nFortfahren?",
+     L"Ini akan memindai GTA5.exe Anda dan membuat kunci NG (ng.dat / lut.dat) yang diperlukan untuk membaca arsip RPF vanilla terenkripsi.\n\nTidak ada kunci yang didistribusikan — kunci berasal dari salinan game Anda sendiri.\nPemindaian bisa memakan waktu hingga satu menit dan jendela mungkin tampak sibuk.\n\nLanjutkan?",
+     L"GTA5.exe를 검사하여 암호화된 바닐라 RPF를 읽는 데 필요한 NG 키(ng.dat / lut.dat)를 생성합니다.\n\n키 데이터는 배포되지 않으며 사용자의 게임 사본에서 파생됩니다.\n검사는 최대 1분 정도 걸리며 창이 멈춘 것처럼 보일 수 있습니다.\n\n계속할까요?",
+     L"Questo analizzerà il tuo GTA5.exe e genererà le chiavi NG (ng.dat / lut.dat) necessarie per leggere gli archivi RPF vanilla cifrati.\n\nNessuna chiave viene distribuita — derivano dalla tua copia del gioco.\nL'analisi può richiedere fino a un minuto e la finestra può sembrare occupata.\n\nContinuare?" } },
+ { L"Project cache snapshots are stored next to the executable. Non-nested, non-NG RPF entries are repacked into the original container (a .bak copy is kept); entries inside nested RPFs are exported as .ytd sidecars.", { L"Project cache snapshots are stored next to the executable. Non-nested, non-NG RPF entries are repacked into the original container (a .bak copy is kept); entries inside nested RPFs are exported as .ytd sidecars.", L"Snapshots do cache ficam ao lado do executável. Entradas de RPF não-aninhadas e não-NG são regravadas no container original (mantém-se cópia .bak); entradas em RPFs aninhados saem como sidecars .ytd.", L"Las instantáneas de caché se guardan junto al ejecutable. Las entradas RPF no anidadas y no NG se reempaquetan en el contenedor original (se conserva una copia .bak); las entradas dentro de RPF anidados se exportan como sidecars .ytd.", L"Снимки кэша хранятся рядом с исполняемым файлом. Невложенные не-NG записи RPF перезаписываются в исходный контейнер (создаётся копия .bak); записи во вложенных RPF экспортируются как .ytd.", L"Önbellek anlık görüntüleri yürütülebilir dosyanın yanında saklanır. İç içe olmayan, NG olmayan RPF girdileri orijinal kapsayıcıya yeniden paketlenir (.bak kopyası tutulur); iç içe RPF girdileri .ytd olarak dışa aktarılır.", L"项目缓存快照存储在可执行文件旁。非嵌套、非 NG 的 RPF 条目会重新打包回原始容器（保留 .bak 副本）；嵌套 RPF 内的条目导出为 .ytd 附带文件。", L"प्रोजेक्ट कैश स्नैपशॉट निष्पादन योग्य फ़ाइल के पास संग्रहीत होते हैं। नॉन-नेस्टेड, नॉन-NG RPF प्रविष्टियाँ मूल कंटेनर में पुनः पैक की जाती हैं (.bak प्रति रखी जाती है); नेस्टेड RPF की प्रविष्टियाँ .ytd के रूप में निर्यात होती हैं।", L"プロジェクトキャッシュのスナップショットは実行ファイルの隣に保存されます。非ネストかつ非 NG の RPF エントリは元のコンテナに再パックされ（.bak コピーを保持）、ネストされた RPF 内のエントリは .ytd として書き出されます。", L"تُخزَّن لقطات الذاكرة المؤقتة بجوار الملف التنفيذي. تُعاد حزم إدخالات RPF غير المتداخلة وغير NG في الحاوية الأصلية (مع الاحتفاظ بنسخة .bak)؛ أما الإدخالات داخل RPF المتداخلة فتُصدَّر كملفات .ytd.", L"প্রকল্প ক্যাশ স্ন্যাপশট নির্বাহযোগ্য ফাইলের পাশে সংরক্ষিত হয়। নন-নেস্টেড, নন-NG RPF এন্ট্রি মূল কন্টেইনারে পুনঃপ্যাক হয় (.bak কপি রাখা হয়); নেস্টেড RPF-এর এন্ট্রি .ytd হিসেবে রপ্তানি হয়।", L"Les instantanés du cache sont stockés à côté de l'exécutable. Les entrées RPF non imbriquées et non NG sont reconditionnées dans le conteneur d'origine (une copie .bak est conservée) ; les entrées des RPF imbriqués sont exportées en .ytd.", L"Cache-Schnappschüsse werden neben der ausführbaren Datei gespeichert. Nicht verschachtelte, Nicht-NG-RPF-Einträge werden in den ursprünglichen Container neu gepackt (eine .bak-Kopie bleibt erhalten); Einträge in verschachtelten RPFs werden als .ytd exportiert.", L"Snapshot cache proyek disimpan di samping file executable. Entri RPF non-bersarang dan non-NG dikemas ulang ke kontainer asli (salinan .bak disimpan); entri di dalam RPF bersarang diekspor sebagai .ytd.", L"프로젝트 캐시 스냅숏은 실행 파일 옆에 저장됩니다. 비중첩·비 NG RPF 항목은 원본 컨테이너에 다시 패킹되며(.bak 사본 유지), 중첩된 RPF 내부 항목은 .ytd로 내보냅니다.", L"Le istantanee della cache vengono salvate accanto all'eseguibile. Le voci RPF non annidate e non NG vengono reimpacchettate nel contenitore originale (viene mantenuta una copia .bak); le voci negli RPF annidati vengono esportate come .ytd." } },
+};
+
+static const wchar_t *i18n_lookup(const wchar_t *en) {
+    if (g_language == UI_LANG_ENGLISH || !en) return NULL;
+    for (size_t i = 0; i < sizeof(g_i18n) / sizeof(g_i18n[0]); i++) {
+        if (wcscmp(g_i18n[i].en, en) == 0) {
+            const wchar_t *s = g_i18n[i].t[g_language];
+            return (s && s[0]) ? s : NULL;
+        }
+    }
+    return NULL;
+}
+
+/* Single-argument translate: returns the table translation for the current
+ * language, or the English key itself. Use for strings whose only source is
+ * the English literal (toolbar labels, menu items, placeholders). */
+static const wchar_t *tr(const wchar_t *en) {
+    const wchar_t *t = i18n_lookup(en);
+    return t ? t : en;
+}
+
 static const wchar_t *trw(const wchar_t *en, const wchar_t *pt,
                            const wchar_t *es, const wchar_t *ru) {
+    const wchar_t *t = i18n_lookup(en);
+    if (t) return t;
     switch (g_language) {
         case UI_LANG_PORTUGUESE: return pt;
         case UI_LANG_SPANISH: return es;
@@ -443,6 +568,8 @@ static const wchar_t *trw(const wchar_t *en, const wchar_t *pt,
 static const wchar_t *trw8(const wchar_t *en, const wchar_t *pt, const wchar_t *es,
                             const wchar_t *ru, const wchar_t *tr, const wchar_t *zh,
                             const wchar_t *hi, const wchar_t *ja) {
+    const wchar_t *t = i18n_lookup(en);
+    if (t) return t;
     switch (g_language) {
         case UI_LANG_PORTUGUESE: return pt;
         case UI_LANG_SPANISH: return es;
@@ -458,9 +585,18 @@ static const wchar_t *trw8(const wchar_t *en, const wchar_t *pt, const wchar_t *
 static const wchar_t *trw9(const wchar_t *en, const wchar_t *pt, const wchar_t *es,
                             const wchar_t *ru, const wchar_t *tr, const wchar_t *zh,
                             const wchar_t *hi, const wchar_t *ja, const wchar_t *ar) {
+    const wchar_t *t = i18n_lookup(en);
+    if (t) return t;
     if (g_language == UI_LANG_ARABIC) return ar;
     return trw8(en, pt, es, ru, tr, zh, hi, ja);
 }
+
+/* Native names for every UI language, indexed by AppLanguage. */
+static const wchar_t *g_language_names[15] = {
+    L"English", L"Português", L"Español", L"Русский", L"Türkçe",
+    L"中文", L"हिन्दी", L"日本語", L"العربية", L"বাংলা",
+    L"Français", L"Deutsch", L"Indonesia", L"한국어", L"Italiano"
+};
 
 static const wchar_t *language_button_text(void) {
     switch (g_language) {
@@ -483,6 +619,14 @@ static const wchar_t *language_button_text(void) {
 }
 
 static void update_sidebar_labels(void) {
+    g_sidebar_btns[0].text = tr(L"Add File");
+    g_sidebar_btns[1].text = tr(L"Add Folder");
+    g_sidebar_btns[2].text = tr(L"Save All");
+    g_sidebar_btns[3].text = tr(L"Clear All");
+    g_sidebar_btns[4].text = tr(L"Detect");
+    g_sidebar_btns[5].text = tr(L"Migrate");
+    g_sidebar_btns[6].text = tr(L"Optimize");
+    g_sidebar_btns[7].text = tr(L"Recomp");
     return;
     g_sidebar_btns[0].text = trw9(L"Add File", L"Adicionar arquivo", L"Añadir arquivo", L"Добавить файл", L"Dosya ekle", L"添加文件", L"फ़ाइल जोड़ें", L"ファイル追加", L"إضافة ملف");
     g_sidebar_btns[1].text = trw9(L"Add Folder", L"Adicionar pasta", L"Añadir carpeta", L"Добавить папку", L"Klasör ekle", L"添加文件夹", L"फ़ोल्डर जोड़ें", L"フォルダー追加", L"إضافة مجلد");
@@ -610,7 +754,7 @@ void gui_init(HINSTANCE hInst) {
         0, 0, 160, 22, g_app.hwnd_sidebar, (HMENU)ID_SEARCH_BOX, hInst, NULL);
     SendMessageW(g_app.hwnd_search, WM_SETFONT, (WPARAM)theme_font_small(), TRUE);
     SetWindowTextW(g_app.hwnd_search, L"");
-    SendMessageW(g_app.hwnd_search, EM_SETCUEBANNER, FALSE, (LPARAM)L"Find Item");
+    SendMessageW(g_app.hwnd_search, EM_SETCUEBANNER, FALSE, (LPARAM)tr(L"Find Item"));
     SendMessageW(g_app.hwnd_search, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 4));
 
     g_app.hwnd_status = CreateWindowExW(0, L"EasyOptimizerStatusBar", NULL,
@@ -2134,11 +2278,33 @@ static LPDLGTEMPLATE build_custom_resize_template(void) {
     return (LPDLGTEMPLATE)buf;
 }
 
+/* Background Smart Optimize job, run on a worker thread. */
+typedef struct {
+    int max_w, max_h, mips;
+    TexFormat fmt;
+    int total;
+} OptJob;
+
+static DWORD WINAPI smart_opt_thread(LPVOID p) {
+    OptJob *job = (OptJob *)p;
+    int total = 0;
+    for (int i = 0; i < g_app.ytd_count; i++) {
+        int r = optimizer_smart_resize(g_app.ytds[i], job->max_w, job->max_h,
+                                       job->fmt, job->mips);
+        LOG("  %s: %d textures resized", g_app.ytds[i]->name, r);
+        total += r;
+    }
+    job->total = total;
+    PostMessageW(g_app.hwnd_main, WM_APP_OPT_DONE, 0, (LPARAM)job);
+    return 0;
+}
+
 static void do_smart_optimize(void) {
     if (g_app.ytd_count == 0) {
         gui_update_status("No files loaded");
         return;
     }
+    if (g_batch_running) return;   /* one batch at a time */
 
     SmartOptParams params = {512, 512, TEX_FMT_UNKNOWN, -2};
     LPDLGTEMPLATE tpl = build_smart_opt_template(L"Smart Optimize");
@@ -2155,15 +2321,27 @@ static void do_smart_optimize(void) {
     log_encoder_intent("Smart Optimize");
     gui_update_status("Optimizing... max %dx%d", params.max_w, params.max_h);
 
-    int total_resized = 0;
-    for (int i = 0; i < g_app.ytd_count; i++) {
-        int r = optimizer_smart_resize(g_app.ytds[i], params.max_w, params.max_h, params.fmt, params.mips);
-        LOG("  %s: %d textures resized", g_app.ytds[i]->name, r);
-        total_resized += r;
-    }
+    /* Run the heavy resize/re-encode off the UI thread. optimizer_smart_resize
+     * already parallelises across textures internally; the worker keeps the
+     * window responsive (the content view shows a busy overlay meanwhile). */
+    OptJob *job = (OptJob *)malloc(sizeof(OptJob));
+    if (!job) return;
+    job->max_w = params.max_w;
+    job->max_h = params.max_h;
+    job->mips  = params.mips;
+    job->fmt   = params.fmt;
+    job->total = 0;
 
-    gui_update_status("Smart Optimize: %d textures resized across %d files", total_resized, g_app.ytd_count);
+    InterlockedExchange(&g_batch_running, 1);
+    EnableWindow(g_app.hwnd_main, FALSE);   /* block input; paint still runs */
     InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+
+    HANDLE th = CreateThread(NULL, 0, smart_opt_thread, job, 0, NULL);
+    if (!th) {  /* fall back to inline if the thread can't start */
+        smart_opt_thread(job);
+    } else {
+        CloseHandle(th);
+    }
 }
 
 static void do_custom_resize(int ytd_idx, int tex_idx) {
@@ -3110,48 +3288,51 @@ static void show_menu_dropdown(HWND hwnd, int menu_idx) {
     ClientToScreen(hwnd, &pt);
     
     if (menu_idx == 0) {
-        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_ADDYTD, L"Add File...");
-        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_ADDFOLDER, L"Add Folder...");
-        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_SAVEALL, L"Save All");
-        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_CLEARALL, L"Clear All");
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_ADDYTD, tr(L"Add File..."));
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_ADDFOLDER, tr(L"Add Folder..."));
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_SAVEALL, tr(L"Save All"));
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_CLEARALL, tr(L"Clear All"));
         AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(hMenu, MF_STRING, ID_MENU_EXIT, L"Exit");
+        AppendMenuW(hMenu, MF_STRING, ID_MENU_EXIT, tr(L"Exit"));
     } else if (menu_idx == 1) {
-        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_DETECT, L"Detect Duplicates");
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_DETECT, tr(L"Detect Duplicates"));
         bool has_migrations = g_has_pending_migration;
-        AppendMenuW(hMenu, MF_STRING | (has_migrations ? MF_ENABLED : (MF_GRAYED | MF_DISABLED)), 
-                    ID_SIDEBAR_MIGRATE, L"Migrate Duplicates");
-        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_OPTIMIZE, L"Smart Optimize");
-        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_FASTRECOMP, L"Fast Recompress");
+        AppendMenuW(hMenu, MF_STRING | (has_migrations ? MF_ENABLED : (MF_GRAYED | MF_DISABLED)),
+                    ID_SIDEBAR_MIGRATE, tr(L"Migrate Duplicates"));
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_OPTIMIZE, tr(L"Smart Optimize"));
+        AppendMenuW(hMenu, MF_STRING, ID_SIDEBAR_FASTRECOMP, tr(L"Fast Recompress"));
     } else if (menu_idx == 2) {
         HMENU hSortMenu = CreatePopupMenu();
-        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_NAME ? MF_CHECKED : 0), ID_MENU_SORT_NAME, L"Sort by Name");
-        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_TYPE ? MF_CHECKED : 0), ID_MENU_SORT_TYPE, L"Sort by Type");
-        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_SIZE ? MF_CHECKED : 0), ID_MENU_SORT_SIZE, L"Sort by Size");
-        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_TEXTURE_COUNT ? MF_CHECKED : 0), ID_MENU_SORT_TEXCOUNT, L"Sort by Textures");
-        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_RESOLUTION ? MF_CHECKED : 0), ID_MENU_SORT_RESOLUTION, L"Sort by Resolution");
-        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_MIPMAPS ? MF_CHECKED : 0), ID_MENU_SORT_MIPMAPS, L"Sort by Mipmaps");
-        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_COMPRESSION ? MF_CHECKED : 0), ID_MENU_SORT_COMPRESSION, L"Sort by Compression");
-        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_MODIFIED ? MF_CHECKED : 0), ID_MENU_SORT_MODIFIED, L"Sort by Modified");
-        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hSortMenu, L"Sort Mode");
-        
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_NAME ? MF_CHECKED : 0), ID_MENU_SORT_NAME, tr(L"Sort by Name"));
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_TYPE ? MF_CHECKED : 0), ID_MENU_SORT_TYPE, tr(L"Sort by Type"));
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_SIZE ? MF_CHECKED : 0), ID_MENU_SORT_SIZE, tr(L"Sort by Size"));
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_TEXTURE_COUNT ? MF_CHECKED : 0), ID_MENU_SORT_TEXCOUNT, tr(L"Sort by Textures"));
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_RESOLUTION ? MF_CHECKED : 0), ID_MENU_SORT_RESOLUTION, tr(L"Sort by Resolution"));
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_MIPMAPS ? MF_CHECKED : 0), ID_MENU_SORT_MIPMAPS, tr(L"Sort by Mipmaps"));
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_COMPRESSION ? MF_CHECKED : 0), ID_MENU_SORT_COMPRESSION, tr(L"Sort by Compression"));
+        AppendMenuW(hSortMenu, MF_STRING | (g_sort_mode == SORT_BY_MODIFIED ? MF_CHECKED : 0), ID_MENU_SORT_MODIFIED, tr(L"Sort by Modified"));
+        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hSortMenu, tr(L"Sort Mode"));
+
         HMENU hGridMenu = CreatePopupMenu();
-        AppendMenuW(hGridMenu, MF_STRING | (g_grid_index == 0 ? MF_CHECKED : 0), ID_MENU_GRID_SMALL, L"Small Cards");
-        AppendMenuW(hGridMenu, MF_STRING | (g_grid_index == 1 ? MF_CHECKED : 0), ID_MENU_GRID_MEDIUM, L"Medium Cards");
-        AppendMenuW(hGridMenu, MF_STRING | (g_grid_index == 2 ? MF_CHECKED : 0), ID_MENU_GRID_NATIVE, L"Native / Original");
-        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hGridMenu, L"Grid Size");
-        
+        AppendMenuW(hGridMenu, MF_STRING | (g_grid_index == 0 ? MF_CHECKED : 0), ID_MENU_GRID_SMALL, tr(L"Small Cards"));
+        AppendMenuW(hGridMenu, MF_STRING | (g_grid_index == 1 ? MF_CHECKED : 0), ID_MENU_GRID_MEDIUM, tr(L"Medium Cards"));
+        AppendMenuW(hGridMenu, MF_STRING | (g_grid_index == 2 ? MF_CHECKED : 0), ID_MENU_GRID_NATIVE, tr(L"Native / Original"));
+        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hGridMenu, tr(L"Grid Size"));
+
         HMENU hEncMenu = CreatePopupMenu();
-        AppendMenuW(hEncMenu, MF_STRING | (!g_app.use_gpu_encoding ? MF_CHECKED : 0), ID_MENU_ENC_CPU, L"Use CPU Encoding");
-        AppendMenuW(hEncMenu, MF_STRING | (g_app.use_gpu_encoding ? MF_CHECKED : 0), ID_MENU_ENC_GPU, L"Use GPU Encoding");
-        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hEncMenu, L"Encoder");
+        AppendMenuW(hEncMenu, MF_STRING | (!g_app.use_gpu_encoding ? MF_CHECKED : 0), ID_MENU_ENC_CPU, tr(L"Use CPU Encoding"));
+        AppendMenuW(hEncMenu, MF_STRING | (g_app.use_gpu_encoding ? MF_CHECKED : 0), ID_MENU_ENC_GPU, tr(L"Use GPU Encoding"));
+        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hEncMenu, tr(L"Encoder"));
+
+        HMENU hLangMenu = CreatePopupMenu();
+        for (int l = 0; l < 15; l++)
+            AppendMenuW(hLangMenu, MF_STRING | (g_language == (AppLanguage)l ? MF_CHECKED : 0),
+                        ID_MENU_LANG_BASE + l, g_language_names[l]);
+        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hLangMenu, tr(L"Language"));
     }
     
     TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, 0, g_app.hwnd_main, NULL);
     DestroyMenu(hMenu);
-}
-
-static void paint_header(HWND hwnd, HDC hdc) {
 }
 
 static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -3185,6 +3366,19 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int id = LOWORD(wp);
         int code = HIWORD(wp);
         
+        /* Language selection from the VIEW → Language submenu. */
+        if (id >= ID_MENU_LANG_BASE && id < ID_MENU_LANG_BASE + 15) {
+            g_language = (AppLanguage)(id - ID_MENU_LANG_BASE);
+            update_sidebar_labels();
+            SendMessageW(g_app.hwnd_search, EM_SETCUEBANNER, FALSE, (LPARAM)tr(L"Find Item"));
+            InvalidateRect(g_app.hwnd_menubar, NULL, TRUE);
+            if (g_app.hwnd_sidebar) InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
+            if (g_app.hwnd_totals) InvalidateRect(g_app.hwnd_totals, NULL, TRUE);
+            InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+            InvalidateRect(g_app.hwnd_status, NULL, TRUE);
+            return 0;
+        }
+
         if (code == EN_CHANGE && id == ID_SEARCH_BOX) {
             wchar_t wbuf[256];
             GetWindowTextW(g_app.hwnd_search, wbuf, 256);
@@ -3300,11 +3494,17 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
-    case WM_DRAWITEM: {
-        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lp;
-        if (dis->hwndItem == g_app.hwnd_header)
-            paint_header(dis->hwndItem, dis->hDC);
-        return TRUE;
+    case WM_APP_OPT_DONE: {
+        OptJob *job = (OptJob *)lp;
+        EnableWindow(g_app.hwnd_main, TRUE);
+        SetForegroundWindow(g_app.hwnd_main);
+        InterlockedExchange(&g_batch_running, 0);
+        gui_update_status("Smart Optimize: %d textures resized across %d files",
+                          job ? job->total : 0, g_app.ytd_count);
+        free(job);
+        layout_children();
+        InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+        return 0;
     }
 
     case WM_DESTROY:
@@ -3334,8 +3534,9 @@ static LRESULT CALLBACK MenuBarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         
         int x = 8;
         for (int i = 0; i < (int)MENU_ITEM_COUNT; i++) {
+            const wchar_t *label = tr(g_menu_items[i].text);
             SIZE sz;
-            GetTextExtentPoint32W(hdc, g_menu_items[i].text, (int)wcslen(g_menu_items[i].text), &sz);
+            GetTextExtentPoint32W(hdc, label, (int)wcslen(label), &sz);
             int item_w = sz.cx + 16;
             
             g_menu_items[i].rc.left = x;
@@ -3356,7 +3557,7 @@ static LRESULT CALLBACK MenuBarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             
             SetTextColor(hdc, CLR_VS_TEXT);
             RECT txt_rc = g_menu_items[i].rc;
-            DrawTextW(hdc, g_menu_items[i].text, -1, &txt_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(hdc, label, -1, &txt_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             
             x += item_w;
         }
@@ -3454,6 +3655,22 @@ static void paint_content(HWND hwnd, HDC hdc) {
     HBRUSH bg = CreateSolidBrush(CLR_BG_DARK);
     FillRect(hdc, &rc, bg);
     DeleteObject(bg);
+
+    /* A background batch is rewriting texture data — don't decode/draw cards
+     * (their data is in flux); show a busy overlay instead. */
+    if (g_batch_running) {
+        ShowScrollBar(hwnd, SB_VERT, FALSE);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, CLR_TEXT_SECONDARY);
+        SelectObject(hdc, theme_font_title());
+        RECT t = rc; t.top = rc.bottom / 2 - 12;
+        DrawTextW(hdc, trw(L"Optimizing… please wait",
+                           L"Otimizando… aguarde",
+                           L"Optimizando… espere",
+                           L"Оптимизация… подождите"), -1, &t,
+                  DT_CENTER | DT_SINGLELINE);
+        return;
+    }
 
     if (g_app.ytd_count == 0) {
         ShowScrollBar(hwnd, SB_VERT, FALSE);
@@ -3964,7 +4181,7 @@ static LRESULT CALLBACK TotalsBarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
         _snwprintf(bytes, 96, L"%I64u Bytes", (unsigned __int64)total_bytes);
 
         RECT label = {24, 0, 120, rc.bottom};
-        DrawTextW(hdc, L"Totals:", -1, &label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, tr(L"Totals:"), -1, &label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         RECT col1 = {360, 0, 520, rc.bottom};
         RECT col2 = {520, 0, 680, rc.bottom};

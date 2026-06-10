@@ -18,7 +18,6 @@ typedef struct {
     HWND hwnd_status;
     HWND hwnd_totals;
     HWND hwnd_search;
-    HWND hwnd_header;
     HWND hwnd_menubar;
 
     YtdFile *ytds[MAX_LOADED_YTDS];

@@ -1,6 +1,7 @@
 #include "texture.h"
 #include "bc7enc_wrapper.h"
 #include "nvtt_c_wrapper.h"
+#include "eo_parallel.h"
 #include "gui.h"
 #include "log.h"
 #include <stdlib.h>
@@ -20,15 +21,20 @@ static void decode_bc2_alpha(const uint8_t *src, uint8_t *alpha16) {
 
 /* ── Generic block decoder ─────────────────────────────────────────── */
 
-static uint8_t *decode_block_image(const uint8_t *data, int w, int h,
-                                    int block_bytes, int fmt) {
-    int bw = (w + 3) / 4;
-    int bh = (h + 3) / 4;
-    uint8_t *out = (uint8_t *)calloc(1, (size_t)w * h * 4);
-    if (!out) return NULL;   /* huge/corrupt dimensions: fail gracefully */
-    const uint8_t *src = data;
+/* Decode context shared by every worker; each worker owns a disjoint block-row
+ * range [by0, by1), reads its own slice of the source and writes disjoint output
+ * rows, so no synchronization is needed. */
+typedef struct {
+    const uint8_t *data;
+    uint8_t       *out;
+    int w, h, bw, block_bytes, fmt;
+} DecodeCtx;
 
-    for (int by = 0; by < bh; by++) {
+static void decode_block_rows(size_t by0, size_t by1, void *vctx) {
+    DecodeCtx *c = (DecodeCtx *)vctx;
+    const int w = c->w, h = c->h, bw = c->bw, fmt = c->fmt;
+    for (int by = (int)by0; by < (int)by1; by++) {
+        const uint8_t *src = c->data + (size_t)by * bw * c->block_bytes;
         for (int bx = 0; bx < bw; bx++) {
             uint8_t rgba[16 * 4];
             memset(rgba, 0, sizeof(rgba));
@@ -75,16 +81,31 @@ static uint8_t *decode_block_image(const uint8_t *data, int w, int h,
                 for (int px = 0; px < 4 && (bx*4+px) < w; px++) {
                     int si = (py * 4 + px) * 4;
                     int di = ((by*4+py) * w + (bx*4+px)) * 4;
-                    out[di+0] = rgba[si+2]; /* B */
-                    out[di+1] = rgba[si+1]; /* G */
-                    out[di+2] = rgba[si+0]; /* R */
-                    out[di+3] = rgba[si+3]; /* A */
+                    c->out[di+0] = rgba[si+2]; /* B */
+                    c->out[di+1] = rgba[si+1]; /* G */
+                    c->out[di+2] = rgba[si+0]; /* R */
+                    c->out[di+3] = rgba[si+3]; /* A */
                 }
             }
-
-            src += block_bytes;
+            src += c->block_bytes;
         }
     }
+}
+
+static uint8_t *decode_block_image(const uint8_t *data, int w, int h,
+                                    int block_bytes, int fmt) {
+    int bw = (w + 3) / 4;
+    int bh = (h + 3) / 4;
+    uint8_t *out = (uint8_t *)calloc(1, (size_t)w * h * 4);
+    if (!out) return NULL;   /* huge/corrupt dimensions: fail gracefully */
+
+    DecodeCtx c = { data, out, w, h, bw, block_bytes, fmt };
+    /* One worker per ~16 block-rows, capped at the hardware thread count, so
+     * small thumbnails stay single-threaded (avoids spawn overhead). Inside an
+     * outer parallel-over-textures region we force serial to avoid nesting. */
+    int nt = eo_inner_serial() ? 1 : (bh / 16);
+    if (nt < 1) nt = 1;
+    eo_parallel_range(0, (size_t)bh, decode_block_rows, &c, nt);
     return out;
 }
 

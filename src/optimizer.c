@@ -1,6 +1,8 @@
 #include "optimizer.h"
 #include "texture.h"
 #include "bc7enc_wrapper.h"
+#include "eo_parallel.h"
+#include "gui.h"
 #include "hash.h"
 #include <stdlib.h>
 #include <string.h>
@@ -137,76 +139,115 @@ void optimizer_free_groups(DupGroup *groups, int count) {
     free(groups);
 }
 
-int optimizer_smart_resize(YtdFile *ytd, int max_width, int max_height, TexFormat target_fmt, int max_mips) {
-    int resized = 0;
-    bc7enc_init();
-
-    for (int i = 0; i < ytd->texture_count; i++) {
-        TextureEntry *te = &ytd->textures[i];
-        if (te->width <= max_width && te->height <= max_height)
-            continue;
-
-        /* Decode to BGRA */
-        int dec_w, dec_h;
-        uint8_t *bgra = tex_decode_to_bgra(te, 0, &dec_w, &dec_h);
-        if (!bgra) continue;
-
-        /* Convert BGRA → RGBA for encoder */
-        size_t px_count = (size_t)dec_w * dec_h;
-        uint8_t *rgba = (uint8_t *)malloc(px_count * 4);
-        if (!rgba) { free(bgra); continue; }
-        for (size_t p = 0; p < px_count; p++) {
-            rgba[p*4+0] = bgra[p*4+2];
-            rgba[p*4+1] = bgra[p*4+1];
-            rgba[p*4+2] = bgra[p*4+0];
-            rgba[p*4+3] = bgra[p*4+3];
-        }
-        free(bgra);
-
-        /* Calculate new dimensions (halve until within limits) */
-        int new_w = dec_w, new_h = dec_h;
-        while (new_w > max_width || new_h > max_height) {
-            new_w = new_w > 1 ? new_w / 2 : 1;
-            new_h = new_h > 1 ? new_h / 2 : 1;
-        }
-        if (new_w < 4) new_w = 4;
-        if (new_h < 4) new_h = 4;
-
-        /* Resize using stb_image_resize2 (Mitchell filter) */
-        uint8_t *resized_rgba = bc7enc_resize_rgba(rgba, dec_w, dec_h, new_w, new_h, 5);
-        free(rgba);
-        if (!resized_rgba) continue;
-
-        /* Re-encode with mips */
-        TexFormat enc_fmt = target_fmt == TEX_FMT_UNKNOWN ? te->format : target_fmt;
-        if (!tex_format_can_encode(enc_fmt)) {
-            bc7enc_free(resized_rgba);
-            continue;
-        }
-        int mip_count = 0;
-        size_t total_size = 0;
-        uint8_t *new_data = tex_generate_mips(resized_rgba, new_w, new_h, enc_fmt,
-                                              (max_mips == -2 ? te->mip_count : (max_mips == -1 ? 13 : max_mips)), &mip_count, &total_size);
-        bc7enc_free(resized_rgba);
-        if (!new_data) continue;
-
-        /* Snapshot the pre-edit state once so Unload can revert instantly. */
-        tex_save_original(te);
-
-        /* Replace texture data */
-        free(te->data);
-        te->data = new_data;
-        te->data_size = total_size;
-        te->width = new_w;
-        te->height = new_h;
-        te->format = enc_fmt;
-        te->mip_count = mip_count;
-        resized++;
+/* BGRA → RGBA channel swap, split across worker threads for large images. */
+typedef struct { const uint8_t *bgra; uint8_t *rgba; } ConvCtx;
+static void convert_bgra_to_rgba(size_t p0, size_t p1, void *vc) {
+    ConvCtx *c = (ConvCtx *)vc;
+    for (size_t p = p0; p < p1; p++) {
+        c->rgba[p*4+0] = c->bgra[p*4+2];
+        c->rgba[p*4+1] = c->bgra[p*4+1];
+        c->rgba[p*4+2] = c->bgra[p*4+0];
+        c->rgba[p*4+3] = c->bgra[p*4+3];
     }
+}
+
+/* Resize+re-encode a single texture in place. Each texture is independent
+ * (its own buffers, its own TextureEntry), so this is safe to run for many
+ * textures concurrently. Returns true if the texture was changed. */
+static bool resize_one_texture(TextureEntry *te, int max_width, int max_height,
+                               TexFormat target_fmt, int max_mips) {
+    if (te->width <= max_width && te->height <= max_height)
+        return false;
+
+    int dec_w, dec_h;
+    uint8_t *bgra = tex_decode_to_bgra(te, 0, &dec_w, &dec_h);
+    if (!bgra) return false;
+
+    size_t px_count = (size_t)dec_w * dec_h;
+    uint8_t *rgba = (uint8_t *)malloc(px_count * 4);
+    if (!rgba) { free(bgra); return false; }
+    ConvCtx cc = { bgra, rgba };
+    eo_parallel_range(0, px_count, convert_bgra_to_rgba, &cc,
+                      eo_inner_serial() ? 1 : 0);
+    free(bgra);
+
+    int new_w = dec_w, new_h = dec_h;
+    while (new_w > max_width || new_h > max_height) {
+        new_w = new_w > 1 ? new_w / 2 : 1;
+        new_h = new_h > 1 ? new_h / 2 : 1;
+    }
+    if (new_w < 4) new_w = 4;
+    if (new_h < 4) new_h = 4;
+
+    uint8_t *resized_rgba = bc7enc_resize_rgba(rgba, dec_w, dec_h, new_w, new_h, 5);
+    free(rgba);
+    if (!resized_rgba) return false;
+
+    TexFormat enc_fmt = target_fmt == TEX_FMT_UNKNOWN ? te->format : target_fmt;
+    if (!tex_format_can_encode(enc_fmt)) { bc7enc_free(resized_rgba); return false; }
+
+    int mip_count = 0;
+    size_t total_size = 0;
+    uint8_t *new_data = tex_generate_mips(resized_rgba, new_w, new_h, enc_fmt,
+        (max_mips == -2 ? te->mip_count : (max_mips == -1 ? 13 : max_mips)),
+        &mip_count, &total_size);
+    bc7enc_free(resized_rgba);
+    if (!new_data) return false;
+
+    tex_save_original(te);   /* snapshot for Unload */
+    free(te->data);
+    te->data = new_data;
+    te->data_size = total_size;
+    te->width = new_w;
+    te->height = new_h;
+    te->format = enc_fmt;
+    te->mip_count = mip_count;
+    return true;
+}
+
+typedef struct {
+    YtdFile *ytd;
+    int max_width, max_height, max_mips;
+    TexFormat target_fmt;
+    unsigned char *done;   /* per-texture result flags (lock-free) */
+} ResizeJob;
+
+static void resize_job_item(size_t i, void *vctx) {
+    ResizeJob *j = (ResizeJob *)vctx;
+    if (resize_one_texture(&j->ytd->textures[i], j->max_width, j->max_height,
+                           j->target_fmt, j->max_mips))
+        j->done[i] = 1;
+}
+
+int optimizer_smart_resize(YtdFile *ytd, int max_width, int max_height, TexFormat target_fmt, int max_mips) {
+    bc7enc_init();   /* must complete before any worker calls the encoder */
+
+    int n = ytd->texture_count;
+    if (n <= 0) return 0;
+
+    unsigned char *done = (unsigned char *)calloc((size_t)n, 1);
+    if (!done) return 0;
+
+    ResizeJob job = { ytd, max_width, max_height, max_mips, target_fmt, done };
+
+    /* CPU encoder is stateless once initialised, so resize whole textures in
+     * parallel (each worker encodes one texture serially → cores stay busy even
+     * for many small textures). The GPU (nvtt) path is not re-entrant, so it
+     * stays sequential with the encoder's own internal threading. */
+    if (!g_app.use_gpu_encoding && n > 1) {
+        eo_set_inner_serial(1);
+        eo_parallel_for(0, (size_t)n, resize_job_item, &job, 0);
+        eo_set_inner_serial(0);
+    } else {
+        for (int i = 0; i < n; i++) resize_job_item((size_t)i, &job);
+    }
+
+    int resized = 0;
+    for (int i = 0; i < n; i++) resized += done[i];
+    free(done);
 
     if (resized > 0)
         ytd->modified = true;
-
     return resized;
 }
 

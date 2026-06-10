@@ -6,6 +6,7 @@
 #include "rdo_bc_encoder.h"
 #include "bc7decomp.h"
 #include "bc7e_ispc.h"
+#include "eo_parallel.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -160,6 +161,10 @@ extern "C" uint8_t *bc7enc_compress(const uint8_t *rgba, int w, int h, int fmt,
 
     int hw_threads = (int)std::thread::hardware_concurrency();
     if (hw_threads > 0 && num_threads > hw_threads) num_threads = hw_threads;
+
+    /* When an outer parallel-over-textures region is active, encode this texture
+     * serially so the total thread count stays ~= core count (no nesting). */
+    if (eo_inner_serial()) num_threads = 1;
 
     if (num_threads <= 1) {
         // Single-threaded path
