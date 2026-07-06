@@ -149,4 +149,21 @@ static inline int tex_row_pitch(int w, TexFormat fmt) {
     return w * tex_format_pixel_bytes(fmt);
 }
 
+/* Value the game stores in the grcTexture Stride field (offset 0x56).
+ * Matches CodeWalker exactly: stride = slicePitch / height, i.e. for block-
+ * compressed formats it is (rowPitch * blockRows) / height = rowPitch/4, NOT the
+ * full row pitch. Writing the full row pitch (4x too large) makes the game read
+ * texture rows at the wrong stride and corrupts the image. Verified against
+ * vanilla textures: this formula reproduces their stored stride exactly. */
+static inline int tex_gta_stride(int w, int h, TexFormat fmt) {
+    if (h < 1) h = 1;
+    if (tex_format_is_compressed(fmt)) {
+        int bw = (w + 3) / 4; if (bw < 1) bw = 1;
+        int bh = (h + 3) / 4; if (bh < 1) bh = 1;
+        int row_pitch = bw * tex_format_block_bytes(fmt);
+        return (int)(((long long)row_pitch * bh) / h);
+    }
+    return w * tex_format_pixel_bytes(fmt);   /* slicePitch/h == rowPitch */
+}
+
 #endif

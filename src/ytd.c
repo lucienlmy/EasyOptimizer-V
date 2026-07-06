@@ -93,67 +93,36 @@ static size_t rsc7_size_from_flags(uint32_t flags) {
     return base_size * (s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8);
 }
 
-/* Max pages (chunks) a resource may declare. The game/CodeWalker/rageAm store
- * virtual+physical chunks in a single fixed array of PG_MAX_CHUNKS entries; a
- * resource that declares more overflows it and is rejected with
- * "address is neither virtual nor physical". We therefore must pick a base page
- * size large enough to keep the chunk count small (real files use few, large
- * pages). To leave room for the other segment we cap each segment at half. */
-#define RSC7_MAX_CHUNKS 128
-
+/* Emit page flags describing a SINGLE page large enough to hold `size`.
+ *
+ * Why one page: the game's resource loader allocates each page (chunk)
+ * separately, so they land at non-contiguous addresses. If a structure straddled
+ * a page boundary it would be split across two unrelated allocations and load as
+ * corrupt — even though CodeWalker's contiguous reader (and ours) can still read
+ * the file. CodeWalker's writer packs blocks into pages specifically so nothing
+ * spans; a single page is the simplest form that guarantees the same invariant,
+ * and it also keeps the chunk count at 1 (well under the 128-chunk limit that
+ * otherwise triggers "address is neither virtual nor physical").
+ *
+ * Page size = 0x200 << shift, chosen as the smallest power-of-two that fits.
+ * Bit layout matches CodeWalker's RpfResourcePageFlags (weight-1 bucket = bit 27;
+ * for >16 MiB, baseShift=15 with a higher-weight single page). */
 static uint32_t rsc7_flags_from_size(size_t size, int version) {
-    if (size == 0) return (uint32_t)((version & 0xF) << 28);
-    static const int caps[]    = {1, 3, 15, 63, 127, 1, 1, 1, 1};
-    static const int weights[] = {256, 128, 64, 32, 16, 8, 4, 2, 1};
+    uint32_t ver = (uint32_t)((version & 0xF) << 28);
+    if (size == 0) return ver;
 
-    int    best_shift     = -1;
-    size_t best_pad       = (size_t)-1;
-    int    best_chunks    = 1 << 30;
-    int    best_counts[9] = {0};
+    int shift = 0;
+    size_t page = 0x200;
+    while (page < size && shift < 15) { page <<= 1; shift++; }
+    if (page >= size)
+        return ver | (1u << 27) | ((uint32_t)shift & 0xF);
 
-    /* pass 0: keep each segment under half the limit (so virtual+physical fit);
-     * pass 1: relax to the full limit only if nothing qualified. */
-    for (int pass = 0; pass < 2 && best_shift < 0; pass++) {
-        int chunk_cap = (pass == 0) ? (RSC7_MAX_CHUNKS / 2) : RSC7_MAX_CHUNKS;
-        for (int base_shift = 0; base_shift <= 0xF; base_shift++) {
-            size_t block_size  = (size_t)0x200 << base_shift;
-            size_t rounded     = (size + block_size - 1) & ~(block_size - 1);
-            size_t block_count = rounded / block_size;
-            int counts[9] = {0};
-            size_t remaining = block_count;
-            for (int i = 0; i < 9; i++) {
-                int take = (int)(remaining / weights[i]);
-                if (take > caps[i]) take = caps[i];
-                counts[i] = take;
-                remaining -= (size_t)take * weights[i];
-            }
-            if (remaining != 0) continue;          /* not representable here */
-            int chunks = 0;
-            for (int i = 0; i < 9; i++) chunks += counts[i];
-            if (chunks > chunk_cap) continue;      /* would overflow chunk array */
-            /* prefer least padding, tie-break fewest chunks */
-            if (best_shift < 0 || rounded < best_pad ||
-                (rounded == best_pad && chunks < best_chunks)) {
-                best_shift = base_shift; best_pad = rounded; best_chunks = chunks;
-                for (int i = 0; i < 9; i++) best_counts[i] = counts[i];
-            }
-        }
-    }
-    if (best_shift < 0) return (uint32_t)((version & 0xF) << 28);
-
-    uint32_t f = 0;
-    f |= (uint32_t)((version & 0xF) << 28);
-    f |= (uint32_t)((best_counts[8] & 1)    << 27);
-    f |= (uint32_t)((best_counts[7] & 1)    << 26);
-    f |= (uint32_t)((best_counts[6] & 1)    << 25);
-    f |= (uint32_t)((best_counts[5] & 1)    << 24);
-    f |= (uint32_t)((best_counts[4] & 0x7F) << 17);
-    f |= (uint32_t)((best_counts[3] & 0x3F) << 11);
-    f |= (uint32_t)((best_counts[2] & 0xF)  << 7);
-    f |= (uint32_t)((best_counts[1] & 0x3)  << 5);
-    f |= (uint32_t)((best_counts[0] & 0x1)  << 4);
-    f |= (uint32_t)(best_shift & 0xF);
-    return f;
+    /* size > 0x200<<15 (16 MiB): one page of weight 2^j at baseShift 15. */
+    static const int wbit[9] = { 27, 26, 25, 24, 17, 11, 7, 5, 4 };
+    int j = 0;
+    page = (size_t)0x200 << 15;
+    while (page < size && j < 8) { page <<= 1; j++; }
+    return ver | (1u << wbit[j]) | (15u & 0xF);
 }
 
 /* ── DX9 format mapping ────────────────────────────────────────────── */
@@ -500,6 +469,10 @@ bool ytd_save(YtdFile *ytd, const wchar_t *filepath) {
     size_t *phys_offs = (size_t *)malloc(count * sizeof(size_t));
     for (int i = 0; i < count; i++) {
         TextureEntry *te = &ytd->textures[sorted[i].index];
+        /* Each texture's pixel data must be 16-byte aligned (CodeWalker uses
+         * ALIGN_SIZE=16). Back-to-back packing can leave a 16-byte format (BC2/
+         * BC3/BC5/BC7) on an 8-byte boundary, which the GPU reads as corrupt. */
+        phys_cursor = align_up(phys_cursor, 16);
         phys_offs[i] = phys_cursor;
         phys_cursor += te->data_size;
     }
@@ -528,8 +501,12 @@ bool ytd_save(YtdFile *ytd, const wchar_t *filepath) {
 
         size_t off = textures_off + GTAV_TEX_SIZE * i;
         uint32_t fmt_val = format_to_dx9(te->format);
-        int stride = tex_row_pitch(te->width, te->format);
+        int stride = tex_gta_stride(te->width, te->height, te->format);
 
+        /* 0x40 = m_PhysicalSizeAndTemplateType. Vanilla textures store a non-zero
+         * value here and fivefury (texfury) reproduces it as the summed size of
+         * mips >= 16px. The game tolerates any value (it recomputes), but we
+         * follow fivefury / vanilla and write the large-mip size. */
         size_t data_size_large = 0;
         for (int m = 0; m < te->mip_count; m++) {
             int mw = te->width >> m; if (mw < 1) mw = 1;
@@ -539,7 +516,7 @@ bool ytd_save(YtdFile *ytd, const wchar_t *filepath) {
         }
 
         wr64(vbuf + off + 0x28, VIRTUAL_BASE + name_offs[i]);
-        wr16(vbuf + off + 0x30, 1);
+        wr16(vbuf + off + 0x30, 1);           /* RefCount = 1 (CodeWalker default) */
         wr32(vbuf + off + 0x40, (uint32_t)data_size_large);
         wr16(vbuf + off + 0x50, (uint16_t)te->width);
         wr16(vbuf + off + 0x52, (uint16_t)te->height);

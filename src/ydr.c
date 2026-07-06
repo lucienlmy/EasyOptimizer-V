@@ -159,62 +159,25 @@ static uint32_t format_to_dx9(TexFormat fmt) {
 }
 
 /* RSC7 page-flag encoding from a segment size (same scheme as ytd.c). */
-/* See ytd.c for the rationale: keep the declared page (chunk) count small so it
- * never overflows the loader's fixed 128-entry chunk array (which manifests as
- * "address is neither virtual nor physical"). Pick the base page size that
- * minimises padding while staying within the chunk budget. */
-#define RSC7_MAX_CHUNKS 128
-
+/* See ytd.c for the full rationale. Emit a SINGLE page big enough for `size` so
+ * no structure spans a page boundary (the game allocates each page separately,
+ * so a spanning block would be split across non-contiguous memory and corrupt).
+ * Page size = 0x200 << shift; bit layout matches CodeWalker's page flags. */
 static uint32_t rsc7_flags_from_size(size_t size, int version) {
-    if (size == 0) return (uint32_t)((version & 0xF) << 28);
-    static const int caps[]    = {1, 3, 15, 63, 127, 1, 1, 1, 1};
-    static const int weights[] = {256, 128, 64, 32, 16, 8, 4, 2, 1};
+    uint32_t ver = (uint32_t)((version & 0xF) << 28);
+    if (size == 0) return ver;
 
-    int    best_shift     = -1;
-    size_t best_pad       = (size_t)-1;
-    int    best_chunks    = 1 << 30;
-    int    best_counts[9] = {0};
+    int shift = 0;
+    size_t page = 0x200;
+    while (page < size && shift < 15) { page <<= 1; shift++; }
+    if (page >= size)
+        return ver | (1u << 27) | ((uint32_t)shift & 0xF);
 
-    for (int pass = 0; pass < 2 && best_shift < 0; pass++) {
-        int chunk_cap = (pass == 0) ? (RSC7_MAX_CHUNKS / 2) : RSC7_MAX_CHUNKS;
-        for (int base_shift = 0; base_shift <= 0xF; base_shift++) {
-            size_t block_size  = (size_t)0x200 << base_shift;
-            size_t rounded     = (size + block_size - 1) & ~(block_size - 1);
-            size_t block_count = rounded / block_size;
-            int counts[9] = {0};
-            size_t remaining = block_count;
-            for (int i = 0; i < 9; i++) {
-                int take = (int)(remaining / weights[i]);
-                if (take > caps[i]) take = caps[i];
-                counts[i] = take;
-                remaining -= (size_t)take * weights[i];
-            }
-            if (remaining != 0) continue;
-            int chunks = 0;
-            for (int i = 0; i < 9; i++) chunks += counts[i];
-            if (chunks > chunk_cap) continue;
-            if (best_shift < 0 || rounded < best_pad ||
-                (rounded == best_pad && chunks < best_chunks)) {
-                best_shift = base_shift; best_pad = rounded; best_chunks = chunks;
-                for (int i = 0; i < 9; i++) best_counts[i] = counts[i];
-            }
-        }
-    }
-    if (best_shift < 0) return (uint32_t)((version & 0xF) << 28);
-
-    uint32_t f = 0;
-    f |= (uint32_t)((version & 0xF) << 28);
-    f |= (uint32_t)((best_counts[8] & 1)    << 27);
-    f |= (uint32_t)((best_counts[7] & 1)    << 26);
-    f |= (uint32_t)((best_counts[6] & 1)    << 25);
-    f |= (uint32_t)((best_counts[5] & 1)    << 24);
-    f |= (uint32_t)((best_counts[4] & 0x7F) << 17);
-    f |= (uint32_t)((best_counts[3] & 0x3F) << 11);
-    f |= (uint32_t)((best_counts[2] & 0xF)  << 7);
-    f |= (uint32_t)((best_counts[1] & 0x3)  << 5);
-    f |= (uint32_t)((best_counts[0] & 0x1)  << 4);
-    f |= (uint32_t)(best_shift & 0xF);
-    return f;
+    static const int wbit[9] = { 27, 26, 25, 24, 17, 11, 7, 5, 4 };
+    int j = 0;
+    page = (size_t)0x200 << 15;
+    while (page < size && j < 8) { page <<= 1; j++; }
+    return ver | (1u << wbit[j]) | (15u & 0xF);
 }
 
 static uint8_t *rsc7_compress(const uint8_t *data, size_t data_size, size_t *out_size) {
@@ -565,10 +528,12 @@ bool ydr_save(YtdFile *archive, const wchar_t *filepath) {
         size_t off = mm->tex_off[i];
         if (off + GTAV_TEX_SIZE > mm->vsize) continue;
 
-        /* Patch entry fields (dims / stride / format / mips). */
+        /* Patch entry fields (dims / stride / format / mips). Stride uses the
+         * game's slicePitch/height convention (tex_gta_stride), not the full row
+         * pitch — the latter is 4x too large and corrupts the image. */
         wr16(vbuf + off + 0x50, (uint16_t)te->width);
         wr16(vbuf + off + 0x52, (uint16_t)te->height);
-        wr16(vbuf + off + 0x56, (uint16_t)tex_row_pitch(te->width, te->format));
+        wr16(vbuf + off + 0x56, (uint16_t)tex_gta_stride(te->width, te->height, te->format));
         wr32(vbuf + off + 0x58, format_to_dx9(te->format));
         vbuf[off + 0x5D] = (uint8_t)te->mip_count;
 
