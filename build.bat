@@ -59,6 +59,25 @@ set CXX_SOURCES=src\bc7enc_wrapper.cpp src\rpf_scan.cpp src\eo_parallel.cpp vend
 
 set ISPC_OBJS=vendor\bc7enc_rdo\bc7e.obj vendor\bc7enc_rdo\bc7e_sse2.obj vendor\bc7enc_rdo\bc7e_sse4.obj vendor\bc7enc_rdo\bc7e_avx.obj vendor\bc7enc_rdo\bc7e_avx2.obj
 
+REM The ISPC BC7 objects are not versioned (see .gitignore). Regenerate them
+REM from bc7e.ispc with the bundled ispc.exe whenever they are missing, so the
+REM build works from a fresh clone.
+if not exist "vendor\bc7enc_rdo\bc7e.obj" (
+    echo [BUILD] Generating ISPC BC7 objects...
+    if not exist "vendor\bc7enc_rdo\ispc.exe" (
+        echo [FAIL] vendor\bc7enc_rdo\ispc.exe not found - cannot generate BC7 objects.
+        goto :fail
+    )
+    pushd vendor\bc7enc_rdo
+    ispc.exe bc7e.ispc -o bc7e.obj -h bc7e_ispc.h --target=sse2-i32x4,sse4-i32x4,avx1-i32x8,avx2-i32x8 --opt=fast-math
+    set ISPC_ERR=%errorlevel%
+    popd
+    if not "%ISPC_ERR%"=="0" (
+        echo [FAIL] ISPC compilation failed.
+        goto :fail
+    )
+)
+
 echo [BUILD] Compiling C sources...
 for %%f in (%C_SOURCES%) do (
     cl %CFLAGS% /c /Fo:build\ %%f
