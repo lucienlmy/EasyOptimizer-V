@@ -68,11 +68,8 @@ if not exist "vendor\bc7enc_rdo\bc7e.obj" (
         echo [FAIL] vendor\bc7enc_rdo\ispc.exe not found - cannot generate BC7 objects.
         goto :fail
     )
-    pushd vendor\bc7enc_rdo
-    ispc.exe bc7e.ispc -o bc7e.obj -h bc7e_ispc.h --target=sse2-i32x4,sse4-i32x4,avx1-i32x8,avx2-i32x8 --opt=fast-math
-    set ISPC_ERR=%errorlevel%
-    popd
-    if not "%ISPC_ERR%"=="0" (
+    vendor\bc7enc_rdo\ispc.exe vendor\bc7enc_rdo\bc7e.ispc -o vendor\bc7enc_rdo\bc7e.obj -h vendor\bc7enc_rdo\bc7e_ispc.h --target=sse2-i32x4,sse4-i32x4,avx1-i32x8,avx2-i32x8 --opt=fast-math
+    if not exist "vendor\bc7enc_rdo\bc7e.obj" (
         echo [FAIL] ISPC compilation failed.
         goto :fail
     )
