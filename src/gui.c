@@ -181,6 +181,7 @@ static void choose_recompress_mode(void);
 static void do_custom_resize(int ytd_idx, int tex_idx);
 static void do_texture_export_dds(int ytd_idx, int tex_idx);
 static void do_archive_export_all_dds(int ytd_idx);
+static void do_archive_export_native(int ytd_idx);
 static void do_texture_remove(int ytd_idx, int tex_idx);
 static void do_texture_unload(int ytd_idx, int tex_idx);
 static bool ng_keys_available(void);
@@ -1686,31 +1687,38 @@ static void save_all(void) {
         return;
     }
 
+    /* Command links (title + one plain line each) instead of bare buttons: the
+     * old dialog crammed the explanation into a paragraph of jargon ("non-nested,
+     * non-NG entries", "sidecars", "versioned cache") that said nothing about
+     * what each choice actually does to the user's files. */
     const TASKDIALOG_BUTTON buttons[] = {
-        {ID_SAVE_REPLACE_ORIGINALS, trw(L"Replace original YTD/WTD files",
-            L"Substituir arquivos YTD/WTD originais", L"Reemplazar archivos YTD/WTD originales",
-            L"Заменить исходные файлы YTD/WTD")},
-        {ID_SAVE_TO_FOLDER, trw(L"Save copies to another folder",
-            L"Salvar cópias em outra pasta", L"Guardar copias en otra carpeta",
-            L"Сохранить копии в другую папку")},
-        {ID_SAVE_PROJECT_CACHE, trw(L"Save only to versioned project cache",
-            L"Salvar somente no cache versionado do projeto", L"Guardar solo en la caché versionada del proyecto",
-            L"Сохранить только в версионный кэш проекта")},
+        {ID_SAVE_TO_FOLDER, trw(
+            L"Save to another folder\nPick a folder. Your original files are not touched.",
+            L"Salvar em outra pasta\nVocê escolhe a pasta. Os arquivos originais não são alterados.",
+            L"Guardar en otra carpeta\nEliges la carpeta. Tus archivos originales no se tocan.",
+            L"Сохранить в другую папку\nВы выбираете папку. Исходные файлы не изменяются.")},
+        {ID_SAVE_REPLACE_ORIGINALS, trw(
+            L"Replace the original files\nOverwrites the files you opened, in place.",
+            L"Substituir os arquivos originais\nGrava por cima dos arquivos que você abriu.",
+            L"Reemplazar los archivos originales\nSobrescribe los archivos que abriste.",
+            L"Заменить исходные файлы\nПерезаписывает открытые вами файлы.")},
+        {ID_SAVE_PROJECT_CACHE, trw(
+            L"Save inside the program only\nKeeps a copy next to the app so you can test first.",
+            L"Salvar só dentro do programa\nGuarda uma cópia junto do app para você testar antes.",
+            L"Guardar solo dentro del programa\nGuarda una copia junto a la app para probar antes.",
+            L"Сохранить только внутри программы\nКопия рядом с приложением, чтобы сначала проверить.")},
     };
     TASKDIALOGCONFIG dialog = {sizeof(dialog)};
     dialog.hwndParent = g_app.hwnd_main;
-    dialog.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    dialog.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_COMMAND_LINKS;
     dialog.pszWindowTitle = trw(L"Save All", L"Salvar tudo", L"Guardar todo", L"Сохранить все");
-    dialog.pszMainInstruction = trw(L"Choose how to save the modified files",
-        L"Escolha como salvar os arquivos modificados", L"Elija cómo guardar los archivos modificados",
-        L"Выберите способ сохранения измененных файлов");
-    dialog.pszContent = trw(L"Project cache snapshots are stored next to the executable. Non-nested, non-NG RPF entries are repacked into the original container (a .bak copy is kept); entries inside nested RPFs are exported as .ytd sidecars.",
-        L"Snapshots do cache ficam ao lado do executável. Entradas de RPF não-aninhadas e não-NG são regravadas no container original (mantém-se cópia .bak); entradas em RPFs aninhados saem como sidecars .ytd.",
-        L"Las instantáneas de caché se guardan junto al ejecutable. Las entradas RPF no anidadas y no NG se reempaquetan en el contenedor original.",
-        L"Снимки кэша проекта хранятся рядом с исполняемым файлом. Невложенные не-NG записи RPF перезаписываются в исходный контейнер.");
+    dialog.pszMainInstruction = trw(L"Where do you want to save?",
+        L"Onde você quer salvar?", L"¿Dónde quieres guardar?", L"Куда сохранить?");
+    dialog.pszContent = NULL;
     dialog.cButtons = ARRAYSIZE(buttons);
     dialog.pButtons = buttons;
-    dialog.nDefaultButton = ID_SAVE_PROJECT_CACHE;
+    /* Default to the predictable, non-destructive choice. */
+    dialog.nDefaultButton = ID_SAVE_TO_FOLDER;
 
     int choice = IDCANCEL;
     if (FAILED(TaskDialogIndirect(&dialog, &choice, NULL, NULL)) || choice == IDCANCEL)
@@ -2867,6 +2875,51 @@ static void do_texture_export_dds(int ytd_idx, int tex_idx) {
 
 /* Export every texture of one archive as standalone .dds files into a folder
  * chosen by the user (i.e. outside the GTA container). */
+/* Export one archive in its OWN game format: a .ydr comes back as a .ydr, a
+ * .yft as a .yft, a .ydd as a .ydd, a dictionary as .ytd/.wtd. This is what the
+ * card's "Export" button does — loose .dds files are a separate, explicitly
+ * labelled action in the context menu, and getting a "<name>.ydr_dds" folder
+ * when you asked to export a prop meant the optimized model was never written
+ * at all. */
+static void do_archive_export_native(int ytd_idx) {
+    if (ytd_idx < 0 || ytd_idx >= g_app.ytd_count) return;
+    YtdFile *ytd = g_app.ytds[ytd_idx];
+    if (ytd->is_rpf_group || ytd->texture_count == 0) {
+        gui_update_status("Nothing to export");
+        return;
+    }
+    if (ytd->type == ARCHIVE_MODEL_READONLY && !ytd->model_meta) {
+        gui_update_status("'%s': original model data was not retained; cannot rebuild it",
+                          ytd->name);
+        LOG_ERR("export_native: '%s' has no model payload", ytd->name);
+        return;
+    }
+
+    wchar_t folder[MAX_PATH];
+    if (!select_folder(g_app.hwnd_main,
+            trw(L"Select folder for export", L"Selecione a pasta para exportar",
+                L"Seleccione la carpeta para exportar", L"Выберите папку для экспорта"),
+            folder, MAX_PATH))
+        return;
+
+    /* Keep the source file name and extension. For RPF entries the in-container
+     * path is mirrored so entries with colliding leaf names stay separate. */
+    wchar_t output[MAX_PATH];
+    build_export_path(ytd, folder, output, MAX_PATH);
+    if (!ensure_parent_dirs(output)) {
+        gui_update_status("Could not create output folder for '%s'", ytd->name);
+        return;
+    }
+
+    if (save_archive_to_path(ytd, output)) {
+        LOG("export_native: '%s' -> %ls", ytd->name, output);
+        gui_update_status("Exported '%s' to %ls", ytd->name, output);
+    } else {
+        LOG_ERR("export_native: failed writing %ls", output);
+        gui_update_status("Failed exporting '%s'", ytd->name);
+    }
+}
+
 static void do_archive_export_all_dds(int ytd_idx) {
     if (ytd_idx < 0 || ytd_idx >= g_app.ytd_count) return;
     YtdFile *ytd = g_app.ytds[ytd_idx];
@@ -3097,14 +3150,12 @@ static bool handle_archive_header_click(HWND hwnd, int mx, int my, int y,
             return true;
         }
     }
-    /* Export button (mirror of gui_draw_ytd_card geometry). */
-    if (!ytd->is_preview && !ytd->is_rpf_group && ytd->texture_count > 0) {
-        int ddr = ytd->from_rpf ? (area_w - 132) : (area_w - 52);
-        int ddl = ddr - 68;
-        if (mx >= ddl && mx <= ddr && my >= y + 16 && my <= y + 40) {
-            do_archive_export_all_dds(ytd_idx);
-            return true;
-        }
+    /* Save / Export — geometry shared with the painter. */
+    RECT save_b, exp_b;
+    if (gui_card_action_rects(ytd, area_w - 16, &save_b, &exp_b)) {   /* card: x=8, w=area_w-16 */
+        POINT pt = { mx - 8, my - y };
+        if (PtInRect(&save_b, pt)) { do_archive_export_native(ytd_idx); return true; }
+        if (PtInRect(&exp_b, pt))  { do_archive_export_all_dds(ytd_idx); return true; }
     }
     ytd->expanded = !ytd->expanded;
     LOG("Archive '%s' %s (%d textures)", ytd->name,
@@ -4053,14 +4104,17 @@ static LRESULT CALLBACK ContentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                     YtdFile *child = g_app.ytds[c];
                     if (child->rpf_parent != ytd) continue;
                     if (my >= y && my < y + RPF_ENTRY_H) {
-                        int unload_left = area_w - 108, unload_right = area_w - 48;
-                        int dds_left = area_w - 184, dds_right = area_w - 116;
-                        if (mx >= unload_left && mx <= unload_right &&
-                            my >= y + 9 && my <= y + 33) {
+                        /* Row is drawn at x=20, w=area_w-28; match it exactly. */
+                        const int rx = 20, rw = area_w - 28;
+                        POINT pt = { mx - rx, my - y };
+                        RECT unload_b = { rw - 108, 9, rw - 48, 33 };
+                        RECT row_save, row_exp;
+                        bool has_actions = gui_rpf_row_action_rects(child, rw, &row_save, &row_exp);
+                        if (PtInRect(&unload_b, pt)) {
                             unload_rpf_archive(c);
-                        } else if (child->texture_count > 0 &&
-                                   mx >= dds_left && mx <= dds_right &&
-                                   my >= y + 9 && my <= y + 33) {
+                        } else if (has_actions && PtInRect(&row_save, pt)) {
+                            do_archive_export_native(c);
+                        } else if (has_actions && PtInRect(&row_exp, pt)) {
                             do_archive_export_all_dds(c);
                         } else {
                             child->expanded = !child->expanded;

@@ -71,7 +71,7 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd,
 
     SetTextColor(hdc, theme_archive_size_color(total_mib));
     SelectObject(hdc, theme_font_small());
-    RECT info_rc = {x + 60, y + 30, x + w - 40, y + 48};
+    RECT info_rc = {x + 60, y + 30, x + w - 190, y + 48};   /* clear of the action buttons */
     DrawTextW(hdc, info, -1, &info_rc, DT_LEFT | DT_SINGLELINE);
 
     /* Preview consolidated YTDs get a "Maintain" toggle to keep originals. */
@@ -93,16 +93,22 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd,
         DrawTextW(hdc, L"Unload", -1, &btn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    /* Export button (every regular/file card with textures), placed next
-     * to the Unload slot. Exports all of this archive's textures to a folder. */
-    if (!ytd->is_preview && !ytd->is_rpf_group && ytd->texture_count > 0) {
-        int ddr = ytd->from_rpf ? (w - 124) : (w - 44);
-        int ddl = ddr - 68;
-        RECT db = {x + ddl, y + 16, x + ddr, y + 40};
-        theme_flat_rect(hdc, &db, CLR_VS_BTN_BG, CLR_VS_BTN_BORDER);
-        SetTextColor(hdc, RGB(0x1F, 0x6B, 0x3A));
+    /* Save = rewrite the file in its own game format; Export = dump textures as
+     * loose .dds. Geometry comes from the shared helper so the hit-tester in
+     * gui.c cannot drift out of sync with what is painted here. */
+    RECT save_b, exp_b;
+    if (gui_card_action_rects(ytd, w, &save_b, &exp_b)) {
+        OffsetRect(&save_b, x, y);
+        OffsetRect(&exp_b, x, y);
+
+        theme_flat_rect(hdc, &save_b, CLR_VS_BTN_BG, CLR_VS_BTN_BORDER);
+        SetTextColor(hdc, RGB(0x1F, 0x4E, 0x8A));
         SelectObject(hdc, theme_font_small_bold());
-        DrawTextW(hdc, L"Export", -1, &db, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, L"Save", -1, &save_b, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        theme_flat_rect(hdc, &exp_b, CLR_VS_BTN_BG, CLR_VS_BTN_BORDER);
+        SetTextColor(hdc, RGB(0x1F, 0x6B, 0x3A));
+        DrawTextW(hdc, L"Export", -1, &exp_b, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
     /* Expand arrow */
@@ -111,6 +117,28 @@ void gui_draw_ytd_card(HDC hdc, int x, int y, int w, YtdFile *ytd,
     const wchar_t *arrow = ytd->expanded ? L"\x25BC" : L"\x25B6";
     RECT arrow_rc = {x + w - 30, y + 16, x + w - 8, y + 40};
     DrawTextW(hdc, arrow, -1, &arrow_rc, DT_CENTER | DT_SINGLELINE);
+}
+
+/* Card action buttons, in card-relative coordinates. Painter and hit-tester both
+ * call this, so the clickable area always matches the drawn one. */
+bool gui_card_action_rects(const YtdFile *ytd, int w, RECT *out_save, RECT *out_export) {
+    if (!ytd || ytd->is_preview || ytd->is_rpf_group || ytd->texture_count <= 0)
+        return false;
+    int right = ytd->from_rpf ? (w - 124) : (w - 44);   /* left of Unload / arrow */
+    SetRect(out_save, right - CARD_BTN_W, 16, right, 40);
+    SetRect(out_export, right - CARD_BTN_W * 2 - CARD_BTN_GAP, 16,
+                        right - CARD_BTN_W - CARD_BTN_GAP, 40);
+    return true;
+}
+
+/* Same, for a row inside an expanded RPF group. */
+bool gui_rpf_row_action_rects(const YtdFile *ytd, int w, RECT *out_save, RECT *out_export) {
+    if (!ytd || ytd->texture_count <= 0) return false;
+    int right = w - 116;                                /* left of Unload */
+    SetRect(out_save, right - CARD_BTN_W, 9, right, 33);
+    SetRect(out_export, right - CARD_BTN_W * 2 - CARD_BTN_GAP, 9,
+                        right - CARD_BTN_W - CARD_BTN_GAP, 33);
+    return true;
 }
 
 void gui_draw_rpf_entry_row(HDC hdc, int x, int y, int w, YtdFile *ytd) {
@@ -123,7 +151,7 @@ void gui_draw_rpf_entry_row(HDC hdc, int x, int y, int w, YtdFile *ytd) {
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, CLR_TEXT_PRIMARY);
     SelectObject(hdc, theme_font_small_bold());
-    RECT name_rc = {x + 14, y + 6, x + w - 126, y + 22};
+    RECT name_rc = {x + 14, y + 6, x + w - 256, y + 22};   /* clear of Save/Export/Unload */
     DrawTextW(hdc, name, -1, &name_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     size_t total_size = gui_archive_total_size(ytd);
@@ -136,7 +164,7 @@ void gui_draw_rpf_entry_row(HDC hdc, int x, int y, int w, YtdFile *ytd) {
             ytd->texture_count, total_mib);
     SetTextColor(hdc, CLR_TEXT_SECONDARY);
     SelectObject(hdc, theme_font_small());
-    RECT info_rc = {x + 14, y + 22, x + w - 126, y + 38};
+    RECT info_rc = {x + 14, y + 22, x + w - 256, y + 38};
     DrawTextW(hdc, info, -1, &info_rc, DT_LEFT | DT_SINGLELINE);
 
     RECT unload = {x + w - 108, y + 9, x + w - 48, y + 33};
@@ -145,13 +173,20 @@ void gui_draw_rpf_entry_row(HDC hdc, int x, int y, int w, YtdFile *ytd) {
     SelectObject(hdc, theme_font_small_bold());
     DrawTextW(hdc, L"Unload", -1, &unload, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    /* Export button, left of Unload. */
-    if (ytd->texture_count > 0) {
-        RECT db = {x + w - 184, y + 9, x + w - 116, y + 33};
-        theme_flat_rect(hdc, &db, CLR_VS_BTN_BG, CLR_VS_BTN_BORDER);
-        SetTextColor(hdc, RGB(0x1F, 0x6B, 0x3A));
+    /* Save / Export, left of Unload — same split as the file card. */
+    RECT row_save, row_exp;
+    if (gui_rpf_row_action_rects(ytd, w, &row_save, &row_exp)) {
+        OffsetRect(&row_save, x, y);
+        OffsetRect(&row_exp, x, y);
+
+        theme_flat_rect(hdc, &row_save, CLR_VS_BTN_BG, CLR_VS_BTN_BORDER);
+        SetTextColor(hdc, RGB(0x1F, 0x4E, 0x8A));
         SelectObject(hdc, theme_font_small_bold());
-        DrawTextW(hdc, L"Export", -1, &db, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, L"Save", -1, &row_save, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        theme_flat_rect(hdc, &row_exp, CLR_VS_BTN_BG, CLR_VS_BTN_BORDER);
+        SetTextColor(hdc, RGB(0x1F, 0x6B, 0x3A));
+        DrawTextW(hdc, L"Export", -1, &row_exp, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
     SetTextColor(hdc, CLR_TEXT_PRIMARY);
