@@ -1,5 +1,6 @@
 #include "gui.h"
 #include <shellapi.h>
+#include "settings.h"
 #include "theme.h"
 #include "ytd.h"
 #include "wtd.h"
@@ -240,7 +241,25 @@ typedef enum {
     UI_LANG_ITALIAN
 } AppLanguage;
 
+#define UI_LANG_COUNT 15
+#define EO_SETTING_LANGUAGE L"Language"
+
 static AppLanguage g_language = UI_LANG_ENGLISH;
+
+/* Restore the language chosen in a previous run. Must happen before the sidebar
+ * labels and menus are built, otherwise the first frame renders in English. */
+static void load_language_preference(void) {
+    DWORD stored = 0;
+    if (eo_setting_get_dword(EO_SETTING_LANGUAGE, &stored) && stored < UI_LANG_COUNT)
+        g_language = (AppLanguage)stored;
+}
+
+/* Single place where the language changes, so every entry point persists it. */
+static void set_language(AppLanguage lang) {
+    if ((int)lang < 0 || (int)lang >= UI_LANG_COUNT) return;
+    g_language = lang;
+    eo_setting_set_dword(EO_SETTING_LANGUAGE, (DWORD)lang);
+}
 
 typedef enum {
     SORT_BY_NAME,
@@ -664,6 +683,7 @@ void gui_init(HINSTANCE hInst) {
     INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icex);
     theme_init();
+    load_language_preference();   /* before any label/menu is built */
     update_sidebar_labels();
 
     HICON app_icon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
@@ -1259,7 +1279,7 @@ static bool select_folder(HWND parent, const wchar_t *title, wchar_t *out_path, 
 }
 
 static void select_language(void) {
-    g_language = (AppLanguage)((g_language + 1) % 15);
+    set_language((AppLanguage)((g_language + 1) % UI_LANG_COUNT));
     update_sidebar_labels();
     InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
     InvalidateRect(g_app.hwnd_content, NULL, TRUE);
@@ -3339,7 +3359,7 @@ static void show_menu_dropdown(HWND hwnd, int menu_idx) {
         AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hEncMenu, tr(L"Encoder"));
 
         HMENU hLangMenu = CreatePopupMenu();
-        for (int l = 0; l < 15; l++)
+        for (int l = 0; l < UI_LANG_COUNT; l++)
             AppendMenuW(hLangMenu, MF_STRING | (g_language == (AppLanguage)l ? MF_CHECKED : 0),
                         ID_MENU_LANG_BASE + l, g_language_names[l]);
         AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hLangMenu, tr(L"Language"));
@@ -3416,8 +3436,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int code = HIWORD(wp);
         
         /* Language selection from the VIEW → Language submenu. */
-        if (id >= ID_MENU_LANG_BASE && id < ID_MENU_LANG_BASE + 15) {
-            g_language = (AppLanguage)(id - ID_MENU_LANG_BASE);
+        if (id >= ID_MENU_LANG_BASE && id < ID_MENU_LANG_BASE + UI_LANG_COUNT) {
+            set_language((AppLanguage)(id - ID_MENU_LANG_BASE));
             update_sidebar_labels();
             SendMessageW(g_app.hwnd_search, EM_SETCUEBANNER, FALSE, (LPARAM)tr(L"Find Item"));
             InvalidateRect(g_app.hwnd_menubar, NULL, TRUE);
