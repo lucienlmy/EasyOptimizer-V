@@ -17,6 +17,7 @@
 #include "ydr.h"
 #include "hash.h"
 #include "log.h"
+#include "rsc7_pages.h"
 #include <windows.h>
 
 #define RSC7_MAGIC       0x37435352
@@ -207,6 +208,8 @@ typedef struct {
     uint8_t *vdata; size_t vsize;   /* system/virtual segment */
     uint8_t *pdata; size_t psize;   /* graphics/physical segment */
     uint32_t version;
+    uint32_t orig_sys_flags;        /* page layout the file shipped with */
+    uint32_t orig_gfx_flags;
     int      count;                 /* number of mapped texture entries (== texture_count) */
     size_t  *tex_off;               /* entry offset in vdata per texture */
     size_t  *data_off;              /* original data offset in pdata per texture */
@@ -464,6 +467,8 @@ YtdFile *ydr_load(const wchar_t *filepath) {
             mm->pdata = payload + sys_size;
             mm->psize = gfx_size;
             mm->version = version;
+            mm->orig_sys_flags = sys_flags;
+            mm->orig_gfx_flags = gfx_flags;
             mm->count = total_loaded;
             memcpy(mm->tex_off,  temp_tex_off,  total_loaded * sizeof(size_t));
             memcpy(mm->data_off, temp_data_off, total_loaded * sizeof(size_t));
@@ -549,9 +554,17 @@ bool ydr_save(YtdFile *archive, const wchar_t *filepath) {
             continue;
         }
 
-        if (te->data_size == orig_size && mm->data_off[i] + te->data_size <= mm->psize) {
-            /* Same size: patch in place (structure identical to original). */
+        if (te->data_size <= orig_size && mm->data_off[i] + orig_size <= mm->psize) {
+            /* Fits the original slot, which is the common case since optimizing
+             * only ever shrinks a texture. Reusing the slot keeps the graphics
+             * segment byte-identical in size and layout to the shipped file, so
+             * its original multi-page allocation stays valid and we never have to
+             * round the segment up to a single power-of-two page. The slack at
+             * the tail of the slot is zeroed: it costs nothing on disk (deflate
+             * eats it) and keeps output deterministic. */
             memcpy(pbuf + mm->data_off[i], te->data, te->data_size);
+            if (orig_size > te->data_size)
+                memset(pbuf + mm->data_off[i] + te->data_size, 0, orig_size - te->data_size);
             wr64(vbuf + off + 0x70, PHYSICAL_BASE + mm->data_off[i]);
         } else {
             /* Different size: append at a 16-aligned offset and repoint. */
@@ -573,10 +586,21 @@ bool ydr_save(YtdFile *archive, const wchar_t *filepath) {
     size_t new_psize = pcursor;
 
     /* Recompute page flags and pad each segment up to its flag-encoded size. */
-    uint32_t sys_flags = rsc7_flags_from_size(mm->vsize, mm->version);
-    uint32_t gfx_flags = rsc7_flags_from_size(new_psize, mm->version);
+    /* The system segment is copied verbatim and patched in place, so its size
+     * never changes — keep the file's own page layout instead of collapsing it
+     * into one power-of-two page. Same for graphics whenever every texture went
+     * back into its original slot. Only a genuine append (a texture that grew,
+     * or a slot that no longer fits) needs fresh flags. */
+    uint32_t sys_flags = mm->orig_sys_flags ? mm->orig_sys_flags
+                                            : rsc7_flags_from_size(mm->vsize, mm->version);
+    uint32_t gfx_flags = (new_psize <= mm->psize && mm->orig_gfx_flags)
+                             ? mm->orig_gfx_flags
+                             : rsc7_flags_from_size(new_psize, mm->version);
     size_t sys_target = rsc7_size_from_flags(sys_flags);
     size_t gfx_target = rsc7_size_from_flags(gfx_flags);
+    LOG("ydr_save: sys=%zu B (%u pages), gfx=%zu B (%u pages)%s",
+        sys_target, rsc7_page_count(sys_flags), gfx_target, rsc7_page_count(gfx_flags),
+        (new_psize > mm->psize) ? " [appended, repaged]" : " [original paging kept]");
 
     uint8_t *vpad = (uint8_t *)calloc(1, sys_target ? sys_target : 1);
     uint8_t *ppad = (uint8_t *)calloc(1, gfx_target ? gfx_target : 1);

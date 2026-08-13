@@ -1,6 +1,8 @@
 #include "ytd.h"
 #include "hash.h"
 #include "log.h"
+#include "rsc7_pages.h"
+#include "texture.h"
 #include <windows.h>
 
 #define RSC7_MAGIC       0x37435352
@@ -439,6 +441,7 @@ bool ytd_save(YtdFile *ytd, const wchar_t *filepath) {
     int count = ytd->texture_count;
 
     SortEntry *sorted = (SortEntry *)malloc(count * sizeof(SortEntry));
+    if (!sorted) { LOG_ERR("ytd_save: out of memory"); return false; }
     for (int i = 0; i < count; i++) {
         sorted[i].index = i;
         sorted[i].hash = jenk_hash(ytd->textures[i].name);
@@ -453,6 +456,11 @@ bool ytd_save(YtdFile *ytd, const wchar_t *filepath) {
 
     size_t *name_offs = (size_t *)malloc(count * sizeof(size_t));
     size_t *name_lens = (size_t *)malloc(count * sizeof(size_t));
+    if (!name_offs || !name_lens) {
+        LOG_ERR("ytd_save: out of memory");
+        free(sorted); free(name_offs); free(name_lens);
+        return false;
+    }
     for (int i = 0; i < count; i++) {
         TextureEntry *te = &ytd->textures[sorted[i].index];
         name_offs[i] = current;
@@ -465,17 +473,32 @@ bool ytd_save(YtdFile *ytd, const wchar_t *filepath) {
     uint8_t *vbuf = (uint8_t *)calloc(1, virt_size);
     if (!vbuf) { free(sorted); free(name_offs); free(name_lens); return false; }
 
-    size_t phys_cursor = 0;
-    size_t *phys_offs = (size_t *)malloc(count * sizeof(size_t));
-    for (int i = 0; i < count; i++) {
-        TextureEntry *te = &ytd->textures[sorted[i].index];
-        /* Each texture's pixel data must be 16-byte aligned (CodeWalker uses
-         * ALIGN_SIZE=16). Back-to-back packing can leave a 16-byte format (BC2/
-         * BC3/BC5/BC7) on an 8-byte boundary, which the GPU reads as corrupt. */
-        phys_cursor = align_up(phys_cursor, 16);
-        phys_offs[i] = phys_cursor;
-        phys_cursor += te->data_size;
+    /* Physical segment: every texture's mip chain is an independent block, so
+     * bin-pack them into RSC7 pages the way CodeWalker's AssignPositions2 does.
+     * Packing linearly and then rounding the total up to one power-of-two page
+     * is what made a 2.3 MiB dictionary declare 16 MiB of streaming memory.
+     * rsc7_pack keeps each block inside a single page (never straddling) and
+     * 16-byte aligns it, which is what BC2/BC3/BC5/BC7 reads require. */
+    size_t *phys_sizes = (size_t *)malloc(count * sizeof(size_t));
+    size_t *phys_offs  = (size_t *)malloc(count * sizeof(size_t));
+    if (!phys_sizes || !phys_offs) {
+        free(phys_sizes); free(phys_offs);
+        free(sorted); free(name_offs); free(name_lens); free(vbuf);
+        return false;
     }
+    for (int i = 0; i < count; i++)
+        phys_sizes[i] = ytd->textures[sorted[i].index].data_size;
+
+    uint32_t gfx_pages = 0;
+    size_t   phys_cursor = 0;
+    if (!rsc7_pack(phys_sizes, count, RSC7_MAX_PAGES - 1, phys_offs, &gfx_pages, &phys_cursor)) {
+        LOG_ERR("ytd_save: unable to pack physical segment into RSC7 pages");
+        free(phys_sizes); free(phys_offs);
+        free(sorted); free(name_offs); free(name_lens); free(vbuf);
+        return false;
+    }
+    free(phys_sizes);
+
     uint8_t *pbuf = (uint8_t *)calloc(1, phys_cursor ? phys_cursor : 1);
     if (!pbuf) { free(sorted); free(name_offs); free(name_lens); free(vbuf); free(phys_offs); return false; }
 
@@ -535,10 +558,15 @@ bool ytd_save(YtdFile *ytd, const wchar_t *filepath) {
     vbuf[pagemap_off + 1] = 1;
 
     /* Build RSC7 */
+    /* The system segment is a single contiguous block (dictionary + texture
+     * structs + names), so it can only ever occupy one page — nothing to pack. */
     uint32_t sys_flags = rsc7_flags_from_size(virt_size, (YTD_VERSION_LEGACY >> 4) & 0xF);
-    uint32_t gfx_flags = rsc7_flags_from_size(phys_cursor, YTD_VERSION_LEGACY & 0xF);
+    uint32_t gfx_flags = gfx_pages | ((uint32_t)(YTD_VERSION_LEGACY & 0xF) << 28);
     size_t sys_target = rsc7_size_from_flags(sys_flags);
     size_t gfx_target = rsc7_size_from_flags(gfx_flags);
+
+    LOG("ytd_save: sys=%zu B in 1 page (%zu B), gfx=%zu B in %u pages (%zu B)",
+        virt_size, sys_target, phys_cursor, rsc7_page_count(gfx_flags), gfx_target);
 
     size_t payload_size = sys_target + gfx_target;
     uint8_t *payload = (uint8_t *)calloc(1, payload_size);
@@ -591,6 +619,7 @@ void ytd_free(YtdFile *ytd) {
     for (int i = 0; i < ytd->texture_count; i++) {
         free(ytd->textures[i].data);
         free(ytd->textures[i].orig_data);
+        tex_free_preview(&ytd->textures[i]);   /* cached thumbnail is a GDI handle */
     }
     free(ytd->textures);
     free(ytd);

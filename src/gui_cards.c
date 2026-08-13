@@ -178,33 +178,52 @@ void gui_draw_texture_card(HDC hdc, int x, int y, int card_w, int card_h,
     RECT img_rc = {x + 1, y + 1, x + card_w - 1, y + img_h};
     theme_fill_rect(hdc, &img_rc, CLR_VS_EDITOR);
 
-    /* Decode and draw texture preview */
-    int tw = 0, th = 0;
-    uint8_t *pixels = tex_decode_to_bgra(tex, 0, &tw, &th);
-    if (pixels && tw > 0 && th > 0) {
-        HBITMAP hbm = image_create_bitmap(pixels, tw, th);
-        if (hbm) {
-            HDC memDC = CreateCompatibleDC(hdc);
-            HBITMAP oldBM = (HBITMAP)SelectObject(memDC, hbm);
+    /* Draw texture preview from the cached thumbnail, decoding only when the
+     * cache is cold or an edit marked it stale. The decode picks the smallest
+     * mip that still covers the card, so a 2048² BC7 costs a 256² block-decode
+     * instead of a full one — and only once, not once per frame. */
+    int avail_w = card_w - 2;
+    int avail_h = img_h - 2;
+    if (tex->preview_dirty) tex_free_preview(tex);
 
-            int avail_w = card_w - 2;
-            int avail_h = img_h - 2;
-            float ratio_w = (float)avail_w / tw;
-            float ratio_h = (float)avail_h / th;
-            float ratio = ratio_w < ratio_h ? ratio_w : ratio_h;
-            int dw = (int)(tw * ratio);
-            int dh = (int)(th * ratio);
-            int dx = x + 1 + (avail_w - dw) / 2;
-            int dy = y + 1 + (avail_h - dh) / 2;
-
-            SetStretchBltMode(hdc, HALFTONE);
-            StretchBlt(hdc, dx, dy, dw, dh, memDC, 0, 0, tw, th, SRCCOPY);
-
-            SelectObject(memDC, oldBM);
-            DeleteObject(hbm);
-            DeleteDC(memDC);
+    if (!tex->preview_bmp) {
+        int target = avail_w > avail_h ? avail_w : avail_h;
+        int tw = 0, th = 0;
+        int level = tex_preview_mip(tex, target);
+        uint8_t *pixels = tex_decode_to_bgra(tex, level, &tw, &th);
+        /* Some dictionaries advertise more mips than they actually store, which
+         * makes the deeper level fail its bounds check. Fall back to mip 0 so a
+         * bad mip_count costs speed, not a blank card. */
+        if (!pixels && level > 0)
+            pixels = tex_decode_to_bgra(tex, 0, &tw, &th);
+        if (pixels) {
+            if (tw > 0 && th > 0) {
+                tex->preview_bmp = (void *)image_create_bitmap(pixels, tw, th);
+                tex->preview_w = tw;
+                tex->preview_h = th;
+            }
+            free(pixels);
         }
-        free(pixels);
+        tex->preview_dirty = false;
+    }
+
+    if (tex->preview_bmp && tex->preview_w > 0 && tex->preview_h > 0) {
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP oldBM = (HBITMAP)SelectObject(memDC, (HBITMAP)tex->preview_bmp);
+
+        float ratio_w = (float)avail_w / tex->preview_w;
+        float ratio_h = (float)avail_h / tex->preview_h;
+        float ratio = ratio_w < ratio_h ? ratio_w : ratio_h;
+        int dw = (int)(tex->preview_w * ratio);
+        int dh = (int)(tex->preview_h * ratio);
+        int dx = x + 1 + (avail_w - dw) / 2;
+        int dy = y + 1 + (avail_h - dh) / 2;
+
+        SetStretchBltMode(hdc, HALFTONE);
+        StretchBlt(hdc, dx, dy, dw, dh, memDC, 0, 0, tex->preview_w, tex->preview_h, SRCCOPY);
+
+        SelectObject(memDC, oldBM);
+        DeleteDC(memDC);
     }
 
     /* Format badge */

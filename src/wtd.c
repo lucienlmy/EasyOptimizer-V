@@ -1,5 +1,6 @@
 #include "wtd.h"
 #include "log.h"
+#include "texture.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -509,6 +510,7 @@ void wtd_free(YtdFile *wtd) {
         free(wtd->textures[i].data);
         free(wtd->textures[i].orig_data);
         free(wtd->textures[i].wtd_meta);
+        tex_free_preview(&wtd->textures[i]);   /* cached thumbnail is a GDI handle */
     }
     free(wtd->textures);
     free(wtd->wtd_meta);

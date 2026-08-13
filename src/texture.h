@@ -15,6 +15,13 @@ bool tex_alpha_in_use(const TextureEntry *tex);
  * tex_save_original captures the current bytes/dims once (no-op if already saved).
  * tex_revert_original restores them (no-op if nothing saved) and drops the snapshot.
  * tex_free_original releases the snapshot without reverting. */
+/* Smallest mip level whose longest edge still covers `target` pixels. Use it to
+ * avoid decoding mip 0 for small on-screen previews. */
+int  tex_preview_mip(const TextureEntry *tex, int target);
+
+/* Release the cached card thumbnail (HBITMAP), if any. */
+void tex_free_preview(TextureEntry *te);
+
 void tex_save_original(TextureEntry *te);
 bool tex_revert_original(TextureEntry *te);
 void tex_free_original(TextureEntry *te);

@@ -41,7 +41,16 @@ static void decode_block_rows(size_t by0, size_t by1, void *vctx) {
 
             switch (fmt) {
                 case TEX_FMT_BC1:
+                    /* DXT1 is an opaque format in GTA V (punch-through lives in
+                     * its own BC1A format, which the engine never uses here).
+                     * rgbcx still emits alpha=0 for 3-colour-mode index 3, and
+                     * encoders routinely pick that index to store pure black for
+                     * free. Keeping that alpha would bake real transparency into
+                     * the texture once it is re-encoded to BC3/BC7, wiping the
+                     * layer. Force opaque, exactly like texfury/PIL do. */
                     bc7enc_decompress_bc1_block(src, rgba);
+                    for (int i = 0; i < 16; i++)
+                        rgba[i*4+3] = 255;
                     break;
                 case TEX_FMT_BC2: {
                     uint8_t alpha16[16];
@@ -70,7 +79,12 @@ static void decode_block_rows(size_t by0, size_t by1, void *vctx) {
                     }
                     break;
                 case TEX_FMT_BC7:
-                    bc7enc_decompress_bc7_block(src, rgba);
+                    /* A rejected block leaves the memset(0) buffer in place,
+                     * i.e. transparent black. Fall back to opaque black so a
+                     * single bad block cannot punch a hole through the layer. */
+                    if (!bc7enc_decompress_bc7_block(src, rgba))
+                        for (int i = 0; i < 16; i++)
+                            rgba[i*4+3] = 255;
                     break;
                 default:
                     break;
@@ -146,7 +160,12 @@ uint8_t *tex_decode_to_bgra(const TextureEntry *tex, int mip_level, int *out_w, 
         } else if (tex->format == TEX_FMT_A8 || tex->format == TEX_FMT_R8) {
             for (int i = 0; i < w * h; i++) {
                 out[i*4+0] = out[i*4+1] = out[i*4+2] = mip_data[i];
-                out[i*4+3] = 255;
+                /* A8 stores its single channel AS alpha, so it has to land in
+                 * the alpha slot too: tex_generate_mips re-reads channel 3 when
+                 * encoding A8, and without this the round-trip writes a constant
+                 * 0xFF and flattens the mask. R8/L8 is a luminance channel, so
+                 * it stays opaque and is re-read from channel 0. */
+                out[i*4+3] = (tex->format == TEX_FMT_A8) ? mip_data[i] : 255;
             }
         } else if (tex->format == TEX_FMT_B5G6R5 || tex->format == TEX_FMT_B5G5R5A1) {
             for (int i = 0; i < w * h; i++) {
@@ -373,8 +392,35 @@ uint8_t *tex_generate_mips(const uint8_t *rgba, int w, int h, TexFormat fmt,
     return result;
 }
 
+/* Smallest mip that still covers `target` pixels on its longest edge. Previews
+ * are drawn a few hundred pixels wide, so decoding mip 0 of a 2048² texture
+ * throws away ~99% of the work; mip 3 already exceeds any card. */
+int tex_preview_mip(const TextureEntry *tex, int target) {
+    if (!tex || tex->mip_count <= 1 || target <= 0) return 0;
+    int level = 0, w = tex->width, h = tex->height;
+    while (level + 1 < tex->mip_count) {
+        int nw = w > 1 ? w / 2 : 1;
+        int nh = h > 1 ? h / 2 : 1;
+        if (nw < target && nh < target) break;   /* next one would undersample */
+        w = nw; h = nh; level++;
+        if (w == 1 && h == 1) break;
+    }
+    return level;
+}
+
+void tex_free_preview(TextureEntry *te) {
+    if (!te || !te->preview_bmp) return;
+    DeleteObject((HGDIOBJ)te->preview_bmp);
+    te->preview_bmp = NULL;
+    te->preview_w = te->preview_h = 0;
+    te->preview_dirty = false;
+}
+
 void tex_save_original(TextureEntry *te) {
-    if (!te || te->has_orig) return;            /* snapshot only once */
+    if (!te) return;
+    te->preview_dirty = true;   /* set before the has_orig guard: a second edit
+                                 * skips the snapshot but still changes pixels */
+    if (te->has_orig) return;                   /* snapshot only once */
     if (!te->data || te->data_size == 0) return;
     te->orig_data = (uint8_t *)malloc(te->data_size);
     if (!te->orig_data) return;                 /* OOM: skip snapshot, edit still proceeds */
@@ -390,6 +436,7 @@ void tex_save_original(TextureEntry *te) {
 
 bool tex_revert_original(TextureEntry *te) {
     if (!te || !te->has_orig) return false;
+    te->preview_dirty = true;
     free(te->data);
     te->data = te->orig_data;                   /* transfer ownership back (no copy) */
     te->data_size = te->orig_data_size;

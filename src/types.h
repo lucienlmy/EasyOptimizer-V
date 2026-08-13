@@ -49,6 +49,14 @@ typedef struct {
     TexFormat orig_format;
     int orig_mip_count;
     int orig_stride;
+
+    /* Cached card thumbnail. Redecoding mip 0 on every WM_PAINT made scrolling a
+     * BC7-heavy dictionary cost a full block-decompress per card per frame, so
+     * the scaled bitmap is kept until an edit marks it stale. Owned by
+     * gui_cards.c (it is an HBITMAP); released via tex_free_preview. */
+    void *preview_bmp;
+    int   preview_w, preview_h;   /* dimensions of the cached bitmap */
+    bool  preview_dirty;
 } TextureEntry;
 
 typedef enum {

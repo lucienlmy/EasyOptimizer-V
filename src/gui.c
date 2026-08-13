@@ -1103,9 +1103,11 @@ static bool import_rpf_entry(const wchar_t *entry_path, const uint8_t *data,
     YtdFile *archive = load_archive_path(temp_path);
     DeleteFileW(temp_path);
     ctx->discovered++;
+    bool unavailable = false;
     if (!archive) {
         archive = (YtdFile *)calloc(1, sizeof(YtdFile));
         if (!archive) return false;
+        unavailable = true;
         ctx->unavailable++;
     } else {
         ctx->loaded++;
@@ -1115,7 +1117,11 @@ static bool import_rpf_entry(const wchar_t *entry_path, const uint8_t *data,
     WideCharToMultiByte(CP_UTF8, 0, leaf, -1, archive->name, EO_MAX_NAME, NULL, NULL);
     wcsncpy(archive->file_path, entry_path, EO_MAX_PATH - 1);
     archive->file_path[EO_MAX_PATH - 1] = 0;
-    archive->type = ARCHIVE_MODEL_READONLY;
+    /* Keep whatever the loader determined: overwriting this unconditionally sent
+     * .wtd entries through ytd_save (wrong container) and made every .ytd entry
+     * look like a model. Only the placeholder for an entry we failed to load has
+     * no classification of its own. */
+    if (unavailable) archive->type = ARCHIVE_MODEL_READONLY;
     archive->from_rpf = true;
     archive->rpf_parent = ctx->parent;
     wcsncpy(archive->rpf_source_path, ctx->rpf_path, EO_MAX_PATH - 1);
@@ -1724,7 +1730,10 @@ static void save_all(void) {
             if (archive->is_preview) continue;   /* uncommitted migration preview */
             /* Non-nested RPF entries were already repacked into the container. */
             if (archive->from_rpf && !entry_is_nested_rpf(archive->rpf_entry_path)) continue;
-            if (archive->type == ARCHIVE_MODEL_READONLY) {
+            /* RPF entries can never be written back to archive->file_path (that
+             * is a path *inside* the container), so they always go to the export
+             * folder — regardless of which container type they turned out to be. */
+            if (archive->from_rpf || archive->type == ARCHIVE_MODEL_READONLY) {
                 wchar_t output[MAX_PATH];
                 if (archive->from_rpf && archive->rpf_parent) {
                     wchar_t folder[MAX_PATH];
@@ -1736,7 +1745,12 @@ static void save_all(void) {
                 } else {
                     wcsncpy(output, archive->file_path, MAX_PATH - 1);
                     output[MAX_PATH - 1] = 0;
-                    PathRenameExtensionW(output, L".ytd");
+                    /* With a retained payload the model is recomposed in place,
+                     * so keep its own .ydr/.yft/.ydd extension — writing a YDR
+                     * body into a .ytd filename produced a file nothing could
+                     * load. Only a model we could not retain needs a sidecar. */
+                    if (!archive->model_meta)
+                        PathRenameExtensionW(output, L".ytd");
                 }
                 if (!ensure_parent_dirs(output)) {
                     skipped++;
@@ -3344,21 +3358,56 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DROPFILES: {
         HDROP hDrop = (HDROP)wp;
         int count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
-        LOG("WM_DROPFILES: %d files", count);
+        LOG("WM_DROPFILES: %d dropped item(s)", count);
         if (!select_import_types(hwnd)) {
             DragFinish(hDrop);
             return 0;
         }
+
+        /* A single dropped folder can expand into hundreds of archives, so batch
+         * unconditionally rather than only when several items were dropped. */
         bool prev_bulk = g_bulk_add;
-        if (count > 1) g_bulk_add = true;   /* dropping many: collapse */
+        g_bulk_add = true;
+        int before_total = g_app.ytd_count;
+        int folders = 0, files = 0;
+        g_scan_candidates = 0;
+        g_scan_failed = 0;
+
         for (int i = 0; i < count; i++) {
-            wchar_t path[MAX_PATH];
-            DragQueryFileW(hDrop, i, path, MAX_PATH);
-            if (PathMatchSpecW(path, L"*.ytd;*.wtd;*.ydr;*.yft;*.ydd;*.rpf"))
+            /* Ask for the real length first: a fixed MAX_PATH buffer silently
+             * truncated long paths, turning a valid drop into a failed load. */
+            UINT len = DragQueryFileW(hDrop, i, NULL, 0);
+            if (len == 0) continue;
+            wchar_t *path = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
+            if (!path) continue;
+            if (DragQueryFileW(hDrop, i, path, len + 1) == 0) { free(path); continue; }
+
+            DWORD attr = GetFileAttributesW(path);
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                folders++;
+                scan_folder_recursive(path);      /* recurses, honours the type filter */
+            } else if (is_supported_archive_path(path) && should_import_archive_path(path)) {
+                files++;
+                g_scan_candidates++;
+                int before = g_app.ytd_count;
                 gui_add_ytd(path);
+                if (g_app.ytd_count == before) g_scan_failed++;
+            }
+            free(path);
         }
+
         g_bulk_add = prev_bulk;
         DragFinish(hDrop);
+
+        int added = g_app.ytd_count - before_total;
+        if (folders > 0)
+            gui_update_status("Dropped %d folder(s) + %d file(s): %d compatible, %d loaded, %d rejected",
+                folders, files, g_scan_candidates, added, g_scan_failed);
+        else
+            gui_update_status("Dropped %d file(s): %d loaded, %d rejected",
+                files, added, g_scan_failed);
+        InvalidateRect(g_app.hwnd_content, NULL, TRUE);
+        InvalidateRect(g_app.hwnd_sidebar, NULL, TRUE);
         return 0;
     }
 
