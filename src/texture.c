@@ -41,16 +41,13 @@ static void decode_block_rows(size_t by0, size_t by1, void *vctx) {
 
             switch (fmt) {
                 case TEX_FMT_BC1:
-                    /* DXT1 is an opaque format in GTA V (punch-through lives in
-                     * its own BC1A format, which the engine never uses here).
-                     * rgbcx still emits alpha=0 for 3-colour-mode index 3, and
-                     * encoders routinely pick that index to store pure black for
-                     * free. Keeping that alpha would bake real transparency into
-                     * the texture once it is re-encoded to BC3/BC7, wiping the
-                     * layer. Force opaque, exactly like texfury/PIL do. */
+                    /* Punch-through alpha is preserved: in 3-colour mode (c0 <= c1)
+                     * index 3 decodes to transparent black, which is what the GPU
+                     * itself does and what CodeWalker's DecompressDxt1Block
+                     * reproduces. Forcing these texels opaque would turn genuinely
+                     * cut-out DXT1 art (foliage, fences, chain-link) into solid
+                     * black, so the decode stays faithful to the source. */
                     bc7enc_decompress_bc1_block(src, rgba);
-                    for (int i = 0; i < 16; i++)
-                        rgba[i*4+3] = 255;
                     break;
                 case TEX_FMT_BC2: {
                     uint8_t alpha16[16];

@@ -528,6 +528,27 @@ bool ydr_save(YtdFile *archive, const wchar_t *filepath) {
     if (!pbuf) { free(vbuf); SET_LOAD_ERR("out of memory"); return false; }
     memcpy(pbuf, mm->pdata, mm->psize);
 
+    /* A YDD parses one texture dictionary per drawable and concatenates the
+     * results, so sibling drawables that share a texture yield two entries
+     * pointing at the *same* physical block. Writing a shrunk texture into such
+     * a shared slot (and zeroing its tail) would corrupt whatever the other
+     * entry still expects to read there, so aliased textures must be appended
+     * instead of reused in place. */
+    bool *aliased = (bool *)calloc(mm->count ? mm->count : 1, sizeof(bool));
+    if (!aliased) { free(vbuf); free(pbuf); SET_LOAD_ERR("out of memory"); return false; }
+    int alias_count = 0;
+    for (int i = 0; i < mm->count; i++) {
+        for (int j = i + 1; j < mm->count; j++) {
+            if (mm->data_off[i] == mm->data_off[j]) {
+                if (!aliased[i]) { aliased[i] = true; alias_count++; }
+                if (!aliased[j]) { aliased[j] = true; alias_count++; }
+            }
+        }
+    }
+    if (alias_count > 0)
+        LOG("ydr_save: %d texture(s) share a physical block; appending instead of reusing slots",
+            alias_count);
+
     for (int i = 0; i < mm->count; i++) {
         TextureEntry *te = &archive->textures[i];
         size_t off = mm->tex_off[i];
@@ -554,7 +575,7 @@ bool ydr_save(YtdFile *archive, const wchar_t *filepath) {
             continue;
         }
 
-        if (te->data_size <= orig_size && mm->data_off[i] + orig_size <= mm->psize) {
+        if (!aliased[i] && te->data_size <= orig_size && mm->data_off[i] + orig_size <= mm->psize) {
             /* Fits the original slot, which is the common case since optimizing
              * only ever shrinks a texture. Reusing the slot keeps the graphics
              * segment byte-identical in size and layout to the shipped file, so
@@ -573,7 +594,7 @@ bool ydr_save(YtdFile *archive, const wchar_t *filepath) {
             if (need > pcap) {
                 size_t ncap = need + need / 2 + 4096;
                 uint8_t *np = (uint8_t *)realloc(pbuf, ncap);
-                if (!np) { free(vbuf); free(pbuf); SET_LOAD_ERR("out of memory growing graphics segment"); return false; }
+                if (!np) { free(vbuf); free(pbuf); free(aliased); SET_LOAD_ERR("out of memory growing graphics segment"); return false; }
                 pbuf = np; pcap = ncap;
             }
             if (aligned > pcursor) memset(pbuf + pcursor, 0, aligned - pcursor);
@@ -582,6 +603,7 @@ bool ydr_save(YtdFile *archive, const wchar_t *filepath) {
             pcursor = aligned + te->data_size;
         }
     }
+    free(aliased);
 
     size_t new_psize = pcursor;
 

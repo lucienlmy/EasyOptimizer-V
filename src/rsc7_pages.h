@@ -80,7 +80,13 @@ static inline bool rsc7_pack(const size_t *block_sizes, int count,
         if (block_sizes[i] > max_block) max_block = block_sizes[i];
         if (block_sizes[i] < min_block) min_block = block_sizes[i];
     }
-    if (max_block == 0) return true;   /* nothing to place */
+    if (max_block == 0) {
+        /* Every block is empty. Offsets still have to be defined: the caller
+         * writes them into resource pointers regardless of block size, and
+         * leaving the array untouched would emit uninitialised addresses. */
+        for (int i = 0; i < count; i++) out_offsets[i] = 0;
+        return true;
+    }
 
     /* Order blocks largest-first: best-fit-decreasing wastes far less tail space
      * than insertion order, and it puts the largest block in the first page. */
